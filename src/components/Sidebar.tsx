@@ -1,15 +1,17 @@
 import type { RefObject } from "react";
-import type { ArtistGroup } from "../lib/types";
+import type { ArtistGroup, Track } from "../lib/types";
 
 interface SidebarProps {
   artists: ArtistGroup[];
   selectedArtistId: string | null;
   selectedAlbumId: string | null;
+  currentTrackId: string | null;
   searchQuery: string;
   searchInputRef: RefObject<HTMLInputElement>;
   musicFolders: string[];
   onSelectArtist: (artistId: string | null) => void;
   onSelectAlbum: (albumId: string | null) => void;
+  onSelectTrack: (track: Track, albumTracks: Track[]) => void;
   onSearchChange: (value: string) => void;
   onAddFolders: () => void;
   onRefreshLibrary: () => void;
@@ -19,11 +21,13 @@ export function Sidebar({
   artists,
   selectedArtistId,
   selectedAlbumId,
+  currentTrackId,
   searchQuery,
   searchInputRef,
   musicFolders,
   onSelectArtist,
   onSelectAlbum,
+  onSelectTrack,
   onSearchChange,
   onAddFolders,
   onRefreshLibrary,
@@ -79,7 +83,7 @@ export function Sidebar({
               <button
                 className={`nav-item ${selectedArtistId === artist.id ? "nav-item--active" : ""}`}
                 onClick={() => {
-                  onSelectArtist(artist.id);
+                  onSelectArtist(selectedArtistId === artist.id ? null : artist.id);
                   onSelectAlbum(null);
                 }}
               >
@@ -90,14 +94,36 @@ export function Sidebar({
               {selectedArtistId === artist.id ? (
                 <div className="artist-list__albums">
                   {artist.albums.map((album) => (
-                    <button
-                      key={album.id}
-                      className={`sub-nav-item ${selectedAlbumId === album.id ? "sub-nav-item--active" : ""}`}
-                      onClick={() => onSelectAlbum(album.id)}
-                    >
-                      <span>{album.title}</span>
-                      <span className="nav-item__meta">{album.trackCount}</span>
-                    </button>
+                    <div key={album.id} className="tree-node">
+                      <button
+                        className={`sub-nav-item ${selectedAlbumId === album.id ? "sub-nav-item--active" : ""}`}
+                        onClick={() => onSelectAlbum(selectedAlbumId === album.id ? null : album.id)}
+                      >
+                        <span className="tree-label">
+                          <span className="tree-caret">{selectedAlbumId === album.id ? "▾" : "▸"}</span>
+                          <span>{album.title}</span>
+                        </span>
+                        <span className="nav-item__meta">{album.trackCount}</span>
+                      </button>
+
+                      {selectedAlbumId === album.id ? (
+                        <div className="tree-children">
+                          {album.tracks.map((track) => (
+                            <button
+                              key={track.id}
+                              className={`tree-leaf ${currentTrackId === track.id ? "tree-leaf--active" : ""}`}
+                              onClick={() => onSelectTrack(track, album.tracks)}
+                              title={track.title}
+                            >
+                              <span className="tree-label">
+                                <span className="tree-file-dot">♪</span>
+                                <span className="tree-leaf__text">{track.title}</span>
+                              </span>
+                            </button>
+                          ))}
+                        </div>
+                      ) : null}
+                    </div>
                   ))}
                 </div>
               ) : null}

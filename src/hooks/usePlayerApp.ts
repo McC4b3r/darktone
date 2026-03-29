@@ -44,8 +44,6 @@ function getErrorMessage(cause: unknown, fallback: string) {
   return fallback;
 }
 
-const EMPTY_SPECTRUM = Array.from({ length: 160 }, () => 0);
-
 export function usePlayerApp() {
   const [library, setLibrary] = useState<LibraryData>(EMPTY_LIBRARY);
   const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
@@ -66,7 +64,6 @@ export function usePlayerApp() {
     muted: DEFAULT_SETTINGS.muted,
     repeatMode: DEFAULT_SETTINGS.repeatMode,
     shuffle: DEFAULT_SETTINGS.shuffle,
-    spectrum: EMPTY_SPECTRUM,
   });
 
   const hasInitializedRef = useRef(false);
@@ -109,17 +106,39 @@ export function usePlayerApp() {
       onError: (message) => {
         setError(`Playback failed: ${message}`);
       },
-      onSpectrumUpdate: (spectrum) => {
-        setPlayback((state) => ({ ...state, spectrum }));
-      },
     });
-  }, []);
+  }, [playNext]);
 
   useEffect(() => {
     void initialize();
     // We only want the boot sequence once.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useEffect(() => {
+    async function refreshOnFocus() {
+      if (!hasInitializedRef.current || settings.musicFolders.length === 0) return;
+      await refreshLibrary(settings.musicFolders, false);
+    }
+
+    function onWindowFocus() {
+      void refreshOnFocus();
+    }
+
+    function onVisibilityChange() {
+      if (document.visibilityState === "visible") {
+        void refreshOnFocus();
+      }
+    }
+
+    window.addEventListener("focus", onWindowFocus);
+    document.addEventListener("visibilitychange", onVisibilityChange);
+
+    return () => {
+      window.removeEventListener("focus", onWindowFocus);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
+  }, [settings.musicFolders]);
 
   useEffect(() => {
     audioEngine.setVolume(playback.volume);
@@ -198,7 +217,10 @@ export function usePlayerApp() {
       const normalized = normalizeLibrary(result.library);
 
       setLibrary(normalized);
-      setSyncMessage(`Indexed ${result.scannedFiles} files from ${folders.length} folder${folders.length === 1 ? "" : "s"}.`);
+      const indexedMessage = `Indexed ${result.scannedFiles} files from ${folders.length} folder${folders.length === 1 ? "" : "s"}.`;
+      const skippedMessage =
+        result.skippedFiles > 0 ? ` ${result.skippedFiles} files were skipped because only MP3, WAV, and FLAC are supported right now.` : "";
+      setSyncMessage(`${indexedMessage}${skippedMessage}`);
 
       const validQueueTrackIds = queue
         .map((item) => item.trackId)
@@ -213,7 +235,6 @@ export function usePlayerApp() {
           isPlaying: false,
           currentTime: 0,
           duration: 0,
-          spectrum: EMPTY_SPECTRUM,
         }));
         audioEngine.reset();
       }
@@ -244,7 +265,16 @@ export function usePlayerApp() {
   async function playTrack(track: Track, sourceTracks = visibleTracks) {
     try {
       setError(null);
-      const baseQueue = sourceTracks.length ? sourceTracks : [track];
+      const albumContextTracks =
+        allAlbums.find((album) => album.tracks.some((candidate) => candidate.id === track.id))?.tracks ?? [];
+      const baseQueue =
+        sourceTracks.length > 1
+          ? sourceTracks
+          : albumContextTracks.length > 1
+            ? albumContextTracks
+            : sourceTracks.length
+              ? sourceTracks
+              : [track];
       const nextQueue = makeQueue(baseQueue.map((item) => item.id));
       const nextIndex = nextQueue.findIndex((item) => item.trackId === track.id);
 
@@ -356,7 +386,6 @@ export function usePlayerApp() {
         isPlaying: false,
         currentTime: 0,
         duration: 0,
-        spectrum: EMPTY_SPECTRUM,
       }));
       return;
     }
@@ -413,7 +442,7 @@ export function usePlayerApp() {
     visibleTracks,
     selectedAlbum,
     selectedArtistId,
-    selectedAlbumId: selectedAlbum?.id ?? null,
+    selectedAlbumId,
     currentIndex,
     currentTrack,
     queue,

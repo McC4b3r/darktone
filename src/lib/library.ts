@@ -18,10 +18,13 @@ export function normalizeTrack(track: Track): Track {
 }
 
 export function normalizeLibrary(library: LibraryData): LibraryData {
+  const uniqueTracks = Array.from(
+    new Map(library.tracks.map((track) => [track.id, normalizeTrack(track)])).values(),
+  );
+
   return {
     ...library,
-    tracks: library.tracks
-      .map(normalizeTrack)
+    tracks: uniqueTracks
       .sort((a, b) => {
         if (a.artist !== b.artist) return a.artist.localeCompare(b.artist);
         if (a.album !== b.album) return a.album.localeCompare(b.album);

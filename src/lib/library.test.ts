@@ -52,4 +52,13 @@ describe("library helpers", () => {
     expect(filtered.tracks).toHaveLength(1);
     expect(filtered.tracks[0].id).toBe("2");
   });
+
+  it("deduplicates tracks by id during normalization", () => {
+    const duplicated: LibraryData = {
+      ...library,
+      tracks: [...library.tracks, library.tracks[1]],
+    };
+    const normalized = normalizeLibrary(duplicated);
+    expect(normalized.tracks).toHaveLength(2);
+  });
 });

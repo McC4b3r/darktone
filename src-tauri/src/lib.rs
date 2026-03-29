@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::{
+    collections::HashSet,
     fs,
     fs::File,
     path::{Path, PathBuf},
@@ -115,7 +116,7 @@ fn supported_file(path: &Path) -> bool {
         .and_then(|value| value.to_str())
         .map(|extension| {
             let lowered = extension.to_ascii_lowercase();
-            lowered == "mp3" || lowered == "wav"
+            lowered == "mp3" || lowered == "wav" || lowered == "flac"
         })
         .unwrap_or(false)
 }
@@ -236,6 +237,7 @@ fn inspect_audio_file(path: &Path) -> Result<Track, String> {
 async fn scan_library(app: AppHandle, folders: Vec<String>) -> Result<LibraryScanResult, String> {
     let output = tauri::async_runtime::spawn_blocking(move || {
         let mut tracks = Vec::new();
+        let mut seen_paths = HashSet::new();
         let mut scanned_files = 0usize;
         let mut skipped_files = 0usize;
 
@@ -251,6 +253,11 @@ async fn scan_library(app: AppHandle, folders: Vec<String>) -> Result<LibrarySca
                     skipped_files += 1;
                     continue;
                 }
+
+                 let dedupe_key = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+                 if !seen_paths.insert(dedupe_key) {
+                    continue;
+                 }
 
                 match inspect_audio_file(path) {
                     Ok(track) => {

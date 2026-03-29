@@ -1,3 +1,4 @@
+import type { CSSProperties } from "react";
 import { formatTime } from "../lib/library";
 import type { PlaybackState } from "../lib/types";
 
@@ -16,21 +17,31 @@ export function TransportBar({
   onToggleMute,
   onToggleShuffle,
 }: TransportBarProps) {
+  const timelineMax = Math.max(playback.duration, 1);
+  const timelineValue = Math.min(playback.currentTime, playback.duration || 0);
+  const timelinePercent = Math.min(100, (timelineValue / timelineMax) * 100);
+  const remaining = Math.max(playback.duration - playback.currentTime, 0);
+
   return (
     <footer className="transport panel">
       <div className="transport__controls">
         <div className="transport__timeline">
-          <span>{formatTime(playback.currentTime)}</span>
+          <span className="transport__time transport__time--elapsed">{formatTime(playback.currentTime)}</span>
           <input
-            className="range"
+            className="range range--timeline"
             type="range"
             min={0}
-            max={Math.max(playback.duration, 1)}
+            max={timelineMax}
             step={1}
-            value={Math.min(playback.currentTime, playback.duration || 0)}
+            value={timelineValue}
+            style={
+              {
+                "--range-progress": `${timelinePercent}%`,
+              } as CSSProperties
+            }
             onChange={(event) => onSeek(Number(event.target.value))}
           />
-          <span>{formatTime(playback.duration)}</span>
+          <span className="transport__time transport__time--remaining">-{formatTime(remaining)}</span>
         </div>
       </div>
 
@@ -42,7 +53,7 @@ export function TransportBar({
           {playback.muted ? "Muted" : "Volume"}
         </button>
         <input
-          className="range"
+          className="range range--volume"
           type="range"
           min={0}
           max={1}

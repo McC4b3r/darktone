@@ -10,9 +10,7 @@ export default function App() {
   const searchInputRef = useRef<HTMLInputElement>(null);
   const [queueOpen, setQueueOpen] = useState(false);
   const {
-    loading,
     error,
-    syncMessage,
     artists,
     visibleAlbums,
     selectedAlbum,
@@ -31,12 +29,10 @@ export default function App() {
     addFolders,
     refreshLibrary,
     playTrack,
-    playAlbum,
     playQueueIndex,
     togglePlay,
     playNext,
     playPrevious,
-    addToQueue,
     moveQueue,
     removeFromQueue,
     setVolume,
@@ -79,44 +75,31 @@ export default function App() {
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [addFolders, playNext, playPrevious, togglePlay]);
-
-  const heroTitle = selectedArtistId
-    ? visibleAlbums[0]?.artist ?? "Selected Artist"
-    : "All Albums";
   return (
     <div className="app-shell">
       <Sidebar
         artists={artists}
         selectedArtistId={selectedArtistId}
         selectedAlbumId={selectedAlbumId}
+        currentTrackId={currentTrack?.id ?? null}
         searchQuery={searchQuery}
         searchInputRef={searchInputRef}
         musicFolders={settings.musicFolders}
         onSelectArtist={setSelectedArtistId}
         onSelectAlbum={setSelectedAlbumId}
+        onSelectTrack={(track, albumTracks) => void playTrack(track, albumTracks)}
         onSearchChange={setSearchQuery}
         onAddFolders={() => void addFolders()}
         onRefreshLibrary={() => void refreshLibrary()}
       />
 
       <main className="content">
-        <header className="hero panel">
-          <div>
-            <p className="eyebrow">Darktone Player</p>
-            <h1>{heroTitle}</h1>
-          </div>
-          <div className="hero__status">
-            <span>{syncMessage}</span>
-            {loading ? <span className="status-dot" /> : null}
-          </div>
-        </header>
-
         {error ? <div className="error-banner panel">{error}</div> : null}
 
         {!settings.musicFolders.length ? (
           <EmptyState
             title="Start with a music folder"
-            body="Add one or more folders and Darktone will scan MP3 and WAV files into a persistent local library."
+            body="Add one or more folders and Darktone will scan MP3, WAV, and FLAC files into a persistent local library."
             action={
               <button className="button button--primary" onClick={() => void addFolders()}>
                 Add Music Folder
@@ -139,13 +122,10 @@ export default function App() {
               album={selectedAlbum}
               track={currentTrack}
               playback={playback}
-              queueCount={queue.length}
               onTogglePlay={() => void togglePlay()}
               onPrevious={() => void playPrevious()}
               onNext={() => void playNext()}
-              onPlayAlbum={playAlbum}
-              onPlayTrack={(track, album) => void playTrack(track, album.tracks)}
-              onQueueTrack={addToQueue}
+              onSelectTrack={(track, albumTracks) => void playTrack(track, albumTracks)}
             />
           </>
         )}

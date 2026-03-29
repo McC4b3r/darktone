@@ -9,7 +9,7 @@ export interface Track {
   album: string;
   trackNumber: number | null;
   durationMs: number;
-  format: "mp3" | "wav";
+  format: "mp3" | "wav" | "flac";
   modifiedAt: number;
 }
 
@@ -64,5 +64,4 @@ export interface PlaybackState {
   muted: boolean;
   repeatMode: RepeatMode;
   shuffle: boolean;
-  spectrum: number[];
 }
