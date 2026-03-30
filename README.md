@@ -52,6 +52,36 @@ pnpm test
 pnpm build
 ```
 
+## Build A Windows `.exe`
+
+The app is already set up as a `Tauri` desktop app, so the Windows deliverable you want is the NSIS installer `.exe`.
+
+### Option 1: Build on a Windows machine
+
+On Windows, install Node.js, Rust, and `pnpm`, then run:
+
+```bash
+pnpm install
+pnpm tauri build --bundles nsis
+```
+
+The installer will be created under:
+
+```bash
+src-tauri/target/release/bundle/nsis/
+```
+
+### Option 2: Build from GitHub Actions
+
+This repo now includes a manual workflow at `.github/workflows/windows-exe.yml`.
+
+1. Push the repo to GitHub.
+2. Open the `Actions` tab.
+3. Run the `Build Windows EXE` workflow.
+4. Download the workflow artifact named like `windows-x64-nsis`.
+
+That artifact contains the Windows installer `.exe` you can copy to your Windows machine and run.
+
 ## Current Note
 
-The frontend build and tests are validated in this workspace. The Tauri/Rust shell is scaffolded and wired, but compiling the desktop binary in this environment requires a Rust toolchain to be installed first.
+The frontend build and tests are validated in this workspace. Per Tauri's Windows packaging guidance, building a Windows installer is most reliable on Windows or in CI running on `windows-latest`.
