@@ -31,3 +31,7 @@ export async function saveSettings(settings: AppSettings) {
 export async function loadSettings() {
   return invoke<AppSettings>("load_settings");
 }
+
+export async function readAudioFile(path: string) {
+  return invoke<number[]>("read_audio_file", { path });
+}

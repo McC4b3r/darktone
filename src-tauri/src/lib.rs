@@ -194,15 +194,63 @@ fn parse_track_number(value: &str) -> Option<u32> {
         .and_then(|segment| segment.trim().parse::<u32>().ok())
 }
 
-fn inspect_audio_file(path: &Path) -> Result<Track, String> {
-    let file = File::open(path).map_err(|error| error.to_string())?;
-    let metadata = file.metadata().map_err(|error| error.to_string())?;
+fn fallback_track(path: &Path) -> Result<Track, String> {
+    let metadata = fs::metadata(path).map_err(|error| error.to_string())?;
     let modified_at = metadata
         .modified()
         .ok()
         .and_then(|timestamp| timestamp.duration_since(UNIX_EPOCH).ok())
         .map(|duration| duration.as_millis() as u64)
         .unwrap_or_default();
+
+    let format_name = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let filename = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default()
+        .to_string();
+    let full_path = path.to_string_lossy().to_string();
+
+    Ok(Track {
+        id: full_path.clone(),
+        path: full_path,
+        art_path: find_album_art(path),
+        filename: filename.clone(),
+        title: path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or(&filename)
+            .to_string(),
+        artist: path
+            .parent()
+            .and_then(|parent| parent.parent())
+            .and_then(|parent| parent.file_name())
+            .and_then(|name| name.to_str())
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or("Unknown Artist")
+            .to_string(),
+        album: path
+            .parent()
+            .and_then(|parent| parent.file_name())
+            .and_then(|name| name.to_str())
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or("Unknown Album")
+            .to_string(),
+        track_number: None,
+        duration_ms: 0,
+        format: format_name,
+        modified_at,
+    })
+}
+
+fn inspect_audio_file(path: &Path) -> Result<Track, String> {
+    let mut track = fallback_track(path)?;
+    let file = File::open(path).map_err(|error| error.to_string())?;
 
     let source = MediaSourceStream::new(Box::new(file), MediaSourceStreamOptions::default());
     let mut hint = Hint::new();
@@ -220,14 +268,6 @@ fn inspect_audio_file(path: &Path) -> Result<Track, String> {
         .map_err(|error| error.to_string())?;
 
     let mut format = probe.format;
-    let mut title = path
-        .file_stem()
-        .and_then(|stem| stem.to_str())
-        .unwrap_or("Unknown Track")
-        .to_string();
-    let mut artist = "Unknown Artist".to_string();
-    let mut album = "Unknown Album".to_string();
-    let mut track_number = None;
 
     if let Some(metadata_revision) = format.metadata().current() {
         for tag in metadata_revision.tags() {
@@ -236,16 +276,16 @@ fn inspect_audio_file(path: &Path) -> Result<Track, String> {
             };
 
             match tag.std_key {
-                Some(StandardTagKey::TrackTitle) => title = text,
-                Some(StandardTagKey::Artist) => artist = text,
-                Some(StandardTagKey::Album) => album = text,
-                Some(StandardTagKey::TrackNumber) => track_number = parse_track_number(&text),
+                Some(StandardTagKey::TrackTitle) => track.title = text,
+                Some(StandardTagKey::Artist) => track.artist = text,
+                Some(StandardTagKey::Album) => track.album = text,
+                Some(StandardTagKey::TrackNumber) => track.track_number = parse_track_number(&text),
                 _ => {}
             }
         }
     }
 
-    let duration_ms = format
+    track.duration_ms = format
         .default_track()
         .and_then(|track| {
             track
@@ -258,32 +298,6 @@ fn inspect_audio_file(path: &Path) -> Result<Track, String> {
                 })
         })
         .unwrap_or_default();
-
-    let format_name = path
-        .extension()
-        .and_then(|value| value.to_str())
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    let filename = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or_default()
-        .to_string();
-    let full_path = path.to_string_lossy().to_string();
-
-    let track = Track {
-        id: full_path.clone(),
-        path: full_path,
-        art_path: find_album_art(path),
-        filename,
-        title,
-        artist,
-        album,
-        track_number,
-        duration_ms,
-        format: format_name,
-        modified_at,
-    };
 
     let _ = get_codecs();
     Ok(track)
@@ -332,9 +346,15 @@ async fn scan_library(app: AppHandle, folders: Vec<String>) -> Result<LibrarySca
                         scanned_files += 1;
                         tracks.push(track);
                     }
-                    Err(_) => {
-                        skipped_files += 1;
-                        unreadable_audio_files += 1;
+                    Err(_) => match fallback_track(path) {
+                        Ok(track) => {
+                            scanned_files += 1;
+                            tracks.push(track);
+                        }
+                        Err(_) => {
+                            skipped_files += 1;
+                            unreadable_audio_files += 1;
+                        }
                     }
                 }
             }
@@ -397,6 +417,11 @@ fn load_settings(app: AppHandle) -> Result<AppSettings, String> {
     read_json(&path)
 }
 
+#[tauri::command]
+fn read_audio_file(path: String) -> Result<Vec<u8>, String> {
+    fs::read(path).map_err(|error| error.to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -419,7 +444,8 @@ pub fn run() {
             scan_library,
             load_library,
             save_settings,
-            load_settings
+            load_settings,
+            read_audio_file
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

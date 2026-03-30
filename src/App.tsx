@@ -25,6 +25,7 @@ function useMediaQuery(query: string) {
 
 export default function App() {
   const searchInputRef = useRef<HTMLInputElement>(null);
+  const addFoldersRef = useRef<() => Promise<void> | void>(() => undefined);
   const [queueOpen, setQueueOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const reduceMotion = useReducedMotion();
@@ -63,6 +64,8 @@ export default function App() {
     seek,
   } = usePlayerApp();
 
+  addFoldersRef.current = addFolders;
+
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
       const target = event.target as HTMLElement | null;
@@ -99,18 +102,25 @@ export default function App() {
   }, [addFolders, playNext, playPrevious, togglePlay]);
 
   useEffect(() => {
+    let disposed = false;
     let unlisten: (() => void) | undefined;
 
     void listen("menu-open", () => {
-      void addFolders();
+      void addFoldersRef.current();
     }).then((cleanup) => {
+      if (disposed) {
+        cleanup();
+        return;
+      }
+
       unlisten = cleanup;
     });
 
     return () => {
+      disposed = true;
       unlisten?.();
     };
-  }, [addFolders]);
+  }, []);
 
   useEffect(() => {
     if (compactLayout) {

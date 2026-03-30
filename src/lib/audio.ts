@@ -1,5 +1,5 @@
 import { convertFileSrc } from "@tauri-apps/api/core";
-import { readFile } from "@tauri-apps/plugin-fs";
+import { readAudioFile } from "./tauri";
 import type { Track } from "./types";
 
 type AudioCallbacks = {
@@ -181,23 +181,26 @@ export class AudioEngine {
     await this.waitForLoadResult();
   }
 
+  private async assignBlobSource(track: Track) {
+    const bytes = await readAudioFile(track.path);
+    const blob = new Blob([new Uint8Array(bytes)], { type: this.getMimeType(track) });
+    this.objectUrl = URL.createObjectURL(blob);
+    await this.assignSource(this.objectUrl);
+  }
+
   async load(track: Track, autoPlay = true) {
     this.revokeObjectUrl();
     this.loadedTrackId = track.id;
 
-    let directSourceError: Error | null = null;
     try {
-      await this.assignSource(convertFileSrc(track.path));
+      await this.assignBlobSource(track);
     } catch (error) {
-      directSourceError = error instanceof Error ? error : new Error("Direct file playback failed.");
-      const bytes = await readFile(track.path);
-      const blob = new Blob([bytes], { type: this.getMimeType(track) });
-      this.objectUrl = URL.createObjectURL(blob);
+      const blobSourceError = error instanceof Error ? error : new Error("Blob playback failed.");
       try {
-        await this.assignSource(this.objectUrl);
-      } catch (blobError) {
-        const fallbackMessage = blobError instanceof Error ? blobError.message : "Blob playback failed.";
-        throw new Error(`${directSourceError.message}; fallback also failed: ${fallbackMessage}`);
+        await this.assignSource(convertFileSrc(track.path));
+      } catch (directError) {
+        const directMessage = directError instanceof Error ? directError.message : "Direct file playback failed.";
+        throw new Error(`${blobSourceError.message}; fallback also failed: ${directMessage}`);
       }
     }
 
