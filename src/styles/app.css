@@ -189,6 +189,109 @@ button {
   max-width: 220px;
 }
 
+.status-dot--idle {
+  background: rgba(147, 168, 201, 0.48);
+  box-shadow: none;
+}
+
+.sync-status {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 16px 18px;
+  overflow: hidden;
+}
+
+.sync-status--active {
+  border-color: rgba(207, 40, 71, 0.26);
+}
+
+.sync-status__head,
+.sync-status__details,
+.sync-status__badge {
+  display: flex;
+  align-items: center;
+}
+
+.sync-status__head,
+.sync-status__details {
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.sync-status__title,
+.sync-status__message {
+  margin: 0;
+}
+
+.sync-status__title {
+  font-family: "Gill Sans", "Avenir Next Condensed", sans-serif;
+  font-size: 1.05rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.sync-status__message,
+.sync-status__details,
+.sync-status__badge {
+  color: var(--muted);
+}
+
+.sync-status__message {
+  font-size: 0.95rem;
+}
+
+.sync-status__details,
+.sync-status__badge {
+  font-size: 0.82rem;
+}
+
+.sync-status__details {
+  flex-wrap: wrap;
+}
+
+.sync-status__badge {
+  gap: 10px;
+  white-space: nowrap;
+}
+
+.sync-status__bar {
+  position: relative;
+  height: 10px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: rgba(10, 13, 19, 0.92);
+  border: 1px solid rgba(176, 193, 220, 0.1);
+}
+
+.sync-status__bar span {
+  display: block;
+  height: 100%;
+  width: 0;
+  border-radius: inherit;
+  background:
+    linear-gradient(90deg, rgba(207, 40, 71, 0.92), rgba(241, 109, 133, 0.96)),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.06), transparent);
+  box-shadow: 0 0 24px rgba(207, 40, 71, 0.22);
+  transition: width 180ms ease;
+}
+
+.sync-status__bar--indeterminate span {
+  width: 36%;
+  animation: sync-status-indeterminate 1.4s ease-in-out infinite;
+}
+
+@keyframes sync-status-indeterminate {
+  0% {
+    transform: translateX(-110%);
+  }
+
+  100% {
+    transform: translateX(320%);
+  }
+}
+
 .sidebar__section {
   padding-bottom: 12px;
   border-bottom: 1px solid rgba(140, 161, 192, 0.12);

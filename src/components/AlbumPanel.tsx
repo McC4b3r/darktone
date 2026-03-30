@@ -91,7 +91,7 @@ export function AlbumPanel({ artist, album, currentTrackId, onSelectAlbum, onSel
             <p className="library-stage__album-meta">
               {isArtistSongs
                 ? `${panelAlbum.trackCount} songs`
-                : `${panelAlbum.artist} • ${panelAlbum.trackCount} tracks`}
+                : [panelAlbum.artist, panelAlbum.releaseYear, `${panelAlbum.trackCount} tracks`].filter(Boolean).join(" • ")}
             </p>
           </div>
           {showArtistBack ? (

@@ -2,6 +2,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import type { AppSettings, LibraryData, LibraryScanResult } from "./types";
 
+export const LIBRARY_SCAN_PROGRESS_EVENT = "library-scan-progress";
+
 export async function pickMusicFolders() {
   const selection = await open({
     directory: true,
@@ -34,4 +36,8 @@ export async function loadSettings() {
 
 export async function readAudioFile(path: string) {
   return invoke<number[]>("read_audio_file", { path });
+}
+
+export async function decodeAudioForPlayback(path: string) {
+  return invoke<number[]>("decode_audio_for_playback", { path });
 }

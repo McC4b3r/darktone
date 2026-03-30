@@ -1,5 +1,5 @@
 import { convertFileSrc } from "@tauri-apps/api/core";
-import { readAudioFile } from "./tauri";
+import { decodeAudioForPlayback, readAudioFile } from "./tauri";
 import type { Track } from "./types";
 
 type AudioCallbacks = {
@@ -8,6 +8,29 @@ type AudioCallbacks = {
   onPlayStateChange?: (isPlaying: boolean) => void;
   onError?: (message: string) => void;
 };
+
+const PLAYBACK_DEBUG_STORAGE_KEY = "darktone:debug-playback";
+
+function isPlaybackDebugEnabled() {
+  if (import.meta.env.DEV) {
+    return true;
+  }
+
+  try {
+    return window.localStorage.getItem(PLAYBACK_DEBUG_STORAGE_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function logPlaybackDebug(message: string, details?: Record<string, unknown>) {
+  if (!isPlaybackDebugEnabled()) {
+    return;
+  }
+
+  const payload = details ? { ...details } : undefined;
+  console.info(`[playback] ${message}`, payload ?? "");
+}
 
 export class AudioEngine {
   private audio: HTMLAudioElement;
@@ -117,6 +140,12 @@ export class AudioEngine {
     }
   }
 
+  private setObjectUrl(blob: Blob) {
+    this.revokeObjectUrl();
+    this.objectUrl = URL.createObjectURL(blob);
+    return this.objectUrl;
+  }
+
   private describeMediaError() {
     const error = this.audio.error;
     if (!error) {
@@ -184,25 +213,108 @@ export class AudioEngine {
   private async assignBlobSource(track: Track) {
     const bytes = await readAudioFile(track.path);
     const blob = new Blob([new Uint8Array(bytes)], { type: this.getMimeType(track) });
-    this.objectUrl = URL.createObjectURL(blob);
-    await this.assignSource(this.objectUrl);
+    await this.assignSource(this.setObjectUrl(blob));
+  }
+
+  private async assignDecodedSource(track: Track) {
+    const bytes = await decodeAudioForPlayback(track.path);
+    const blob = new Blob([new Uint8Array(bytes)], { type: "audio/wav" });
+    await this.assignSource(this.setObjectUrl(blob));
+  }
+
+  private shouldUseDecodedFallback(track: Track, error: Error) {
+    if (track.format !== "flac") {
+      return false;
+    }
+
+    const message = error.message.toLowerCase();
+    return message.includes("no supported source was found") || message.includes("demuxer_error_could_not_open");
+  }
+
+  private async loadDirectSource(track: Track) {
+    const startedAt = performance.now();
+    await this.assignSource(convertFileSrc(track.path));
+    logPlaybackDebug("loaded direct source", {
+      trackId: track.id,
+      format: track.format,
+      path: track.path,
+      elapsedMs: Math.round(performance.now() - startedAt),
+    });
+  }
+
+  private async loadBlobFallback(track: Track) {
+    const startedAt = performance.now();
+    await this.assignBlobSource(track);
+    logPlaybackDebug("loaded blob fallback", {
+      trackId: track.id,
+      format: track.format,
+      path: track.path,
+      elapsedMs: Math.round(performance.now() - startedAt),
+    });
+  }
+
+  private async loadDecodedFallback(track: Track) {
+    const startedAt = performance.now();
+    await this.assignDecodedSource(track);
+    logPlaybackDebug("loaded decoded wav fallback", {
+      trackId: track.id,
+      format: track.format,
+      path: track.path,
+      elapsedMs: Math.round(performance.now() - startedAt),
+    });
   }
 
   async load(track: Track, autoPlay = true) {
+    const startedAt = performance.now();
     this.revokeObjectUrl();
     this.loadedTrackId = track.id;
 
     try {
-      await this.assignBlobSource(track);
-    } catch (error) {
-      const blobSourceError = error instanceof Error ? error : new Error("Blob playback failed.");
-      try {
-        await this.assignSource(convertFileSrc(track.path));
-      } catch (directError) {
-        const directMessage = directError instanceof Error ? directError.message : "Direct file playback failed.";
-        throw new Error(`${blobSourceError.message}; fallback also failed: ${directMessage}`);
+      await this.loadDirectSource(track);
+    } catch (directError) {
+      const directSourceError = directError instanceof Error ? directError : new Error("Direct file playback failed.");
+      logPlaybackDebug("direct source failed", {
+        trackId: track.id,
+        format: track.format,
+        path: track.path,
+        error: directSourceError.message,
+      });
+
+      if (this.shouldUseDecodedFallback(track, directSourceError)) {
+        try {
+          await this.loadDecodedFallback(track);
+        } catch (decodedError) {
+          const decodedSourceError = decodedError instanceof Error ? decodedError : new Error("Decoded playback failed.");
+          logPlaybackDebug("decoded fallback failed", {
+            trackId: track.id,
+            format: track.format,
+            path: track.path,
+            error: decodedSourceError.message,
+          });
+
+          try {
+            await this.loadBlobFallback(track);
+          } catch (blobError) {
+            const blobSourceError = blobError instanceof Error ? blobError : new Error("Blob playback failed.");
+            throw new Error(`${directSourceError.message}; decoded fallback failed: ${decodedSourceError.message}; blob fallback failed: ${blobSourceError.message}`);
+          }
+        }
+      } else {
+        try {
+          await this.loadBlobFallback(track);
+        } catch (blobError) {
+          const blobSourceError = blobError instanceof Error ? blobError : new Error("Blob playback failed.");
+          throw new Error(`${directSourceError.message}; blob fallback failed: ${blobSourceError.message}`);
+        }
       }
     }
+
+    logPlaybackDebug("load completed", {
+      trackId: track.id,
+      format: track.format,
+      path: track.path,
+      elapsedMs: Math.round(performance.now() - startedAt),
+    });
 
     if (this.getAudioContext().state === "suspended") {
       await this.audioContext?.resume();

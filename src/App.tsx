@@ -5,6 +5,7 @@ import { EmptyState } from "./components/EmptyState";
 import { LibraryStage } from "./components/LibraryStage";
 import { QueuePanel } from "./components/QueuePanel";
 import { Sidebar } from "./components/Sidebar";
+import { SyncStatusCard } from "./components/SyncStatusCard";
 import { TransportBar } from "./components/TransportBar";
 import { usePlayerApp } from "./hooks/usePlayerApp";
 
@@ -33,6 +34,10 @@ export default function App() {
   const narrowDesktop = useMediaQuery("(max-width: 1200px)");
   const {
     error,
+    loading,
+    isSyncing,
+    syncMessage,
+    scanProgress,
     artists,
     visibleAlbums,
     selectedArtist,
@@ -176,10 +181,24 @@ export default function App() {
       <main className="content">
         {error ? <div className="error-banner panel">{error}</div> : null}
 
+        {settings.musicFolders.length ? (
+          <SyncStatusCard
+            loading={loading}
+            isSyncing={isSyncing}
+            message={syncMessage}
+            progress={scanProgress}
+          />
+        ) : null}
+
         {!settings.musicFolders.length ? (
           <EmptyState
             title="Start with a music folder"
             body="Use File > Open or press Cmd/Ctrl+O to add one or more folders and scan MP3, WAV, and FLAC files into your local library."
+          />
+        ) : loading || isSyncing ? (
+          <EmptyState
+            title="Syncing library"
+            body={syncMessage}
           />
         ) : visibleAlbums.length === 0 ? (
           <EmptyState

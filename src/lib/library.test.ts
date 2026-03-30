@@ -13,6 +13,7 @@ const library: LibraryData = {
       title: "",
       artist: "",
       album: "",
+      releaseYear: null,
       trackNumber: 1,
       durationMs: 200000,
       format: "mp3",
@@ -26,6 +27,7 @@ const library: LibraryData = {
       title: "Track Two",
       artist: "Artist A",
       album: "Album A",
+      releaseYear: 1998,
       trackNumber: 2,
       durationMs: 210000,
       format: "mp3",
@@ -47,7 +49,9 @@ describe("library helpers", () => {
     const grouped = groupLibrary(normalizeLibrary(library));
     expect(grouped).toHaveLength(2);
     expect(grouped[0].albums[0].trackCount).toBe(1);
-    expect(grouped[1].albums[0].artPath).toBe("/music/artist-a/album-a/cover.jpg");
+    const artistAlbum = grouped.find((artist) => artist.name === "Artist A")?.albums.find((album) => album.title === "Album A");
+    expect(artistAlbum?.artPath).toBe("/music/artist-a/album-a/cover.jpg");
+    expect(artistAlbum?.releaseYear).toBe(1998);
   });
 
   it("filters on artist album and title text", () => {

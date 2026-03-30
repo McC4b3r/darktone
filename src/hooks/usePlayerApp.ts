@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { listen } from "@tauri-apps/api/event";
 import { audioEngine } from "../lib/audio";
 import {
   filterLibrary,
@@ -8,8 +9,8 @@ import {
   UNKNOWN_ARTIST,
 } from "../lib/library";
 import { getNextQueueIndex, getPreviousQueueIndex, makeQueue, moveQueueItem, removeQueueItem } from "../lib/queue";
-import { loadLibrary, loadSettings, pickMusicFolders, saveSettings, scanLibrary } from "../lib/tauri";
-import type { AppSettings, LibraryData, PlaybackState, QueueItem, RepeatMode, Track } from "../lib/types";
+import { LIBRARY_SCAN_PROGRESS_EVENT, loadLibrary, loadSettings, pickMusicFolders, saveSettings, scanLibrary } from "../lib/tauri";
+import type { AppSettings, LibraryData, LibraryScanProgress, PlaybackState, QueueItem, RepeatMode, Track } from "../lib/types";
 
 const DEFAULT_SETTINGS: AppSettings = {
   musicFolders: [],
@@ -25,6 +26,29 @@ const EMPTY_LIBRARY: LibraryData = {
   tracks: [],
   scannedAt: null,
 };
+
+const PLAYBACK_DEBUG_STORAGE_KEY = "darktone:debug-playback";
+
+function isPlaybackDebugEnabled() {
+  if (import.meta.env.DEV) {
+    return true;
+  }
+
+  try {
+    return window.localStorage.getItem(PLAYBACK_DEBUG_STORAGE_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function logPlaybackDebug(message: string, details?: Record<string, unknown>) {
+  if (!isPlaybackDebugEnabled()) {
+    return;
+  }
+
+  const payload = details ? { ...details } : undefined;
+  console.info(`[playback] ${message}`, payload ?? "");
+}
 
 function cycleRepeatMode(mode: RepeatMode): RepeatMode {
   if (mode === "off") return "all";
@@ -44,6 +68,37 @@ function getErrorMessage(cause: unknown, fallback: string) {
   return fallback;
 }
 
+function getPathLabel(path: string | null) {
+  if (!path) return null;
+  const segments = path.split(/[\\/]/).filter(Boolean);
+  return segments[segments.length - 1] ?? path;
+}
+
+function formatProgressMessage(progress: LibraryScanProgress) {
+  const folderLabel = getPathLabel(progress.currentFolder);
+
+  if (progress.phase === "discovering") {
+    const folderPart =
+      progress.folderCount > 0
+        ? `Scanning folder ${Math.min(progress.foldersCompleted + 1, progress.folderCount)} of ${progress.folderCount}`
+        : "Scanning folders";
+    const foundPart =
+      progress.current === 0
+        ? "looking for supported tracks"
+        : `found ${progress.current} supported file${progress.current === 1 ? "" : "s"} so far`;
+
+    return folderLabel ? `${folderPart} in ${folderLabel}, ${foundPart}.` : `${folderPart}, ${foundPart}.`;
+  }
+
+  if (!progress.total) {
+    return "Preparing the music library index…";
+  }
+
+  const percent = Math.min(100, Math.round((progress.current / progress.total) * 100));
+  const folderPart = folderLabel ? ` from ${folderLabel}` : "";
+  return `Indexing track ${progress.current} of ${progress.total}${folderPart} (${percent}%).`;
+}
+
 export function usePlayerApp() {
   const [library, setLibrary] = useState<LibraryData>(EMPTY_LIBRARY);
   const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
@@ -53,7 +108,9 @@ export function usePlayerApp() {
   const [selectedArtistId, setSelectedArtistId] = useState<string | null>(null);
   const [selectedAlbumId, setSelectedAlbumId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [isSyncing, setIsSyncing] = useState(false);
   const [syncMessage, setSyncMessage] = useState("Loading library…");
+  const [scanProgress, setScanProgress] = useState<LibraryScanProgress | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [playback, setPlayback] = useState<PlaybackState>({
     currentTrackId: null,
@@ -119,6 +176,30 @@ export function usePlayerApp() {
     void initialize();
     // We only want the boot sequence once.
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+
+    void listen<LibraryScanProgress>(LIBRARY_SCAN_PROGRESS_EVENT, (event) => {
+      if (disposed) return;
+      setIsSyncing(true);
+      setScanProgress(event.payload);
+      setSyncMessage(formatProgressMessage(event.payload));
+    }).then((cleanup) => {
+      if (disposed) {
+        cleanup();
+        return;
+      }
+
+      unlisten = cleanup;
+    });
+
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
   }, []);
 
   useEffect(() => {
@@ -218,6 +299,8 @@ export function usePlayerApp() {
 
     try {
       setError(null);
+      setIsSyncing(true);
+      setScanProgress(null);
       if (announce) setSyncMessage("Refreshing library…");
       const result = await scanLibrary(folders);
       const normalized = normalizeLibrary(result.library);
@@ -258,6 +341,9 @@ export function usePlayerApp() {
       console.error(cause);
       setError(getErrorMessage(cause, "Library refresh failed"));
       setSyncMessage("Refresh failed.");
+    } finally {
+      setIsSyncing(false);
+      setScanProgress(null);
     }
   }
 
@@ -279,6 +365,7 @@ export function usePlayerApp() {
   }
 
   async function playTrack(track: Track, sourceTracks = visibleTracks) {
+    const startedAt = performance.now();
     try {
       setError(null);
       const albumContextTracks =
@@ -302,7 +389,18 @@ export function usePlayerApp() {
         currentTime: 0,
         duration: track.durationMs / 1000,
       }));
+      logPlaybackDebug("track selected from library", {
+        trackId: track.id,
+        format: track.format,
+        sourceTrackCount: sourceTracks.length,
+        elapsedMs: Math.round(performance.now() - startedAt),
+      });
       await audioEngine.load(track);
+      logPlaybackDebug("track load finished from library", {
+        trackId: track.id,
+        format: track.format,
+        elapsedMs: Math.round(performance.now() - startedAt),
+      });
     } catch (cause) {
       console.error(cause);
       setError(getErrorMessage(cause, "Playback failed"));
@@ -310,6 +408,7 @@ export function usePlayerApp() {
   }
 
   async function playQueueIndex(index: number) {
+    const startedAt = performance.now();
     try {
       setError(null);
       const track = tracksById.get(queue[index]?.trackId ?? "");
@@ -322,7 +421,19 @@ export function usePlayerApp() {
         currentTime: 0,
         duration: track.durationMs / 1000,
       }));
+      logPlaybackDebug("queue track selected", {
+        trackId: track.id,
+        format: track.format,
+        index,
+        elapsedMs: Math.round(performance.now() - startedAt),
+      });
       await audioEngine.load(track);
+      logPlaybackDebug("queue track load finished", {
+        trackId: track.id,
+        format: track.format,
+        index,
+        elapsedMs: Math.round(performance.now() - startedAt),
+      });
     } catch (cause) {
       console.error(cause);
       setError(getErrorMessage(cause, "Playback failed"));
@@ -464,8 +575,10 @@ export function usePlayerApp() {
 
   return {
     loading,
+    isSyncing,
     error,
     syncMessage,
+    scanProgress,
     searchQuery,
     artists,
     allAlbums,

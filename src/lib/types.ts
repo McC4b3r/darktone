@@ -8,6 +8,7 @@ export interface Track {
   title: string;
   artist: string;
   album: string;
+  releaseYear: number | null;
   trackNumber: number | null;
   durationMs: number;
   format: "mp3" | "wav" | "flac";
@@ -19,6 +20,7 @@ export interface Album {
   title: string;
   artist: string;
   artPath?: string | null;
+  releaseYear: number | null;
   tracks: Track[];
   trackCount: number;
   totalDurationMs: number;
@@ -43,6 +45,17 @@ export interface LibraryScanResult {
   unsupportedFiles: number;
   unreadableEntries: number;
   unreadableAudioFiles: number;
+}
+
+export type LibraryScanPhase = "discovering" | "scanning";
+
+export interface LibraryScanProgress {
+  phase: LibraryScanPhase;
+  current: number;
+  total: number | null;
+  currentFolder: string | null;
+  foldersCompleted: number;
+  folderCount: number;
 }
 
 export interface QueueItem {

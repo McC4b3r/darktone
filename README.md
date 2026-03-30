@@ -5,12 +5,13 @@ Darktone Player is a local-first desktop music player built with `Tauri 2`, `Rea
 ## Features
 
 - Cross-platform desktop architecture for macOS, Windows, and Linux
-- Local folder scanning for `mp3` and `wav`
+- Local folder scanning for `mp3`, `wav`, and `flac`
 - Persistent music library and app settings
 - Artist and album browsing with compact track tables
 - Queue management with reorder and remove actions
 - Play/pause, previous/next, seek, volume, mute, shuffle, repeat-all, and repeat-one
 - Search across artist, album, track title, and filename
+- FLAC playback uses a native decode fallback when the embedded Windows media stack cannot open a file directly
 - Keyboard shortcuts:
   - `Cmd/Ctrl + O` add folder
   - `Cmd/Ctrl + F` focus search

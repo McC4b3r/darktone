@@ -19,6 +19,16 @@ function pickAlbumArtPath(tracks: Track[]) {
   return null;
 }
 
+function pickAlbumReleaseYear(tracks: Track[]) {
+  for (const track of tracks) {
+    if (typeof track.releaseYear === "number" && Number.isFinite(track.releaseYear)) {
+      return track.releaseYear;
+    }
+  }
+
+  return null;
+}
+
 export function normalizeTrack(track: Track): Track {
   return {
     ...track,
@@ -26,6 +36,7 @@ export function normalizeTrack(track: Track): Track {
     title: normalizeValue(track.title, track.filename),
     artist: normalizeValue(track.artist, UNKNOWN_ARTIST),
     album: normalizeValue(track.album, UNKNOWN_ALBUM),
+    releaseYear: Number.isFinite(track.releaseYear) ? track.releaseYear : null,
   };
 }
 
@@ -77,6 +88,7 @@ export function groupLibrary(library: LibraryData): ArtistGroup[] {
             title: albumTitle,
             artist: artistName,
             artPath: pickAlbumArtPath(sortedTracks),
+            releaseYear: pickAlbumReleaseYear(sortedTracks),
             tracks: sortedTracks,
             trackCount: sortedTracks.length,
             totalDurationMs: sortedTracks.reduce((sum, track) => sum + track.durationMs, 0),
