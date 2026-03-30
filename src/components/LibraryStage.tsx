@@ -1,28 +1,36 @@
 import { AlbumPanel } from "./AlbumPanel";
 import { NowPlayingPanel } from "./NowPlayingPanel";
 import { SpectrumPanel } from "./SpectrumPanel";
-import type { Album, PlaybackState, Track } from "../lib/types";
+import type { Album, ArtistGroup, PlaybackState, Track } from "../lib/types";
 
 interface LibraryStageProps {
+  artist: ArtistGroup | null;
   album: Album | null;
+  nowPlayingAlbum: Album | null;
   track: Track | null;
   playback: PlaybackState;
   onTogglePlay: () => void;
   onPrevious: () => void;
   onNext: () => void;
+  onSelectAlbum: (albumId: string | null) => void;
   onSelectTrack: (track: Track, albumTracks: Track[]) => void;
 }
 
 export function LibraryStage({
+  artist,
   album,
+  nowPlayingAlbum,
   track,
   playback,
   onTogglePlay,
   onPrevious,
   onNext,
+  onSelectAlbum,
   onSelectTrack,
 }: LibraryStageProps) {
-  if (!album) {
+  const heroAlbum = nowPlayingAlbum ?? album ?? artist?.albums[0] ?? null;
+
+  if ((!artist && !album) || !heroAlbum) {
     return null;
   }
 
@@ -30,14 +38,20 @@ export function LibraryStage({
     <section className="library-stage panel">
       <div className="library-stage__shell">
         <NowPlayingPanel
-          album={album}
+          album={heroAlbum}
           track={track}
           playback={playback}
           onTogglePlay={onTogglePlay}
           onPrevious={onPrevious}
           onNext={onNext}
         />
-        <AlbumPanel album={album} currentTrackId={track?.id ?? null} onSelectTrack={onSelectTrack} />
+        <AlbumPanel
+          artist={artist}
+          album={album}
+          currentTrackId={track?.id ?? null}
+          onSelectAlbum={onSelectAlbum}
+          onSelectTrack={onSelectTrack}
+        />
         <SpectrumPanel playback={playback} />
       </div>
     </section>

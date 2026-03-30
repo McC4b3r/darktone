@@ -12,6 +12,7 @@ export class AudioEngine {
   private audio: HTMLAudioElement;
   private callbacks: AudioCallbacks = {};
   private objectUrl: string | null = null;
+  private loadedTrackId: string | null = null;
   private audioContext: AudioContext | null = null;
   private sourceNode: MediaElementAudioSourceNode | null = null;
   private outputNode: GainNode | null = null;
@@ -52,6 +53,34 @@ export class AudioEngine {
 
   getMediaElement() {
     return this.audio;
+  }
+
+  hasSource() {
+    return Boolean(this.audio.currentSrc || this.audio.src);
+  }
+
+  private async waitForMetadata() {
+    if (this.audio.readyState >= HTMLMediaElement.HAVE_METADATA) {
+      return;
+    }
+
+    await new Promise<void>((resolve, reject) => {
+      const handleLoadedMetadata = () => {
+        cleanup();
+        resolve();
+      };
+      const handleError = () => {
+        cleanup();
+        reject(new Error(this.audio.error?.message || "Audio metadata failed to load."));
+      };
+      const cleanup = () => {
+        this.audio.removeEventListener("loadedmetadata", handleLoadedMetadata);
+        this.audio.removeEventListener("error", handleError);
+      };
+
+      this.audio.addEventListener("loadedmetadata", handleLoadedMetadata, { once: true });
+      this.audio.addEventListener("error", handleError, { once: true });
+    });
   }
 
   getAudioContext() {
@@ -99,6 +128,7 @@ export class AudioEngine {
     const bytes = await readFile(track.path);
     const blob = new Blob([bytes], { type: this.getMimeType(track) });
     this.objectUrl = URL.createObjectURL(blob);
+    this.loadedTrackId = track.id;
     this.audio.src = this.objectUrl;
     this.audio.load();
     if (this.getAudioContext().state === "suspended") {
@@ -114,6 +144,23 @@ export class AudioEngine {
       await this.audioContext?.resume();
     }
     await this.audio.play();
+  }
+
+  async resume(track: Track, currentTime = 0) {
+    const shouldReload =
+      this.loadedTrackId !== track.id || !this.hasSource() || this.audio.readyState === HTMLMediaElement.HAVE_NOTHING;
+
+    if (shouldReload) {
+      await this.load(track, false);
+      await this.waitForMetadata();
+
+      if (currentTime > 0) {
+        const maxSeekTime = Number.isFinite(this.audio.duration) ? Math.max(this.audio.duration - 0.25, 0) : currentTime;
+        this.audio.currentTime = Math.min(currentTime, maxSeekTime);
+      }
+    }
+
+    await this.play();
   }
 
   pause() {
@@ -142,6 +189,7 @@ export class AudioEngine {
 
   reset() {
     this.revokeObjectUrl();
+    this.loadedTrackId = null;
     this.audio.pause();
     this.audio.removeAttribute("src");
     this.audio.load();

@@ -361,6 +361,101 @@ button {
   font-family: "SFMono-Regular", "IBM Plex Mono", monospace;
 }
 
+.album-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: 12px;
+}
+
+.album-grid--compact {
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  align-content: start;
+  min-height: 0;
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.album-card {
+  padding: 0;
+  overflow: hidden;
+  border-radius: 14px;
+  text-align: left;
+}
+
+.album-card__cover {
+  position: relative;
+  min-height: 164px;
+  display: flex;
+  align-items: flex-end;
+  justify-content: flex-start;
+  background:
+    radial-gradient(circle at 30% 18%, rgba(182, 32, 58, 0.26), transparent 34%),
+    radial-gradient(circle at right top, rgba(71, 116, 182, 0.24), transparent 36%),
+    linear-gradient(160deg, rgba(38, 16, 22, 0.96), rgba(10, 14, 22, 0.98));
+}
+
+.album-card__cover img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.album-card__cover > span {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  font-size: 3.6rem;
+  font-weight: 700;
+  color: rgba(255, 236, 241, 0.16);
+}
+
+.album-card__overlay {
+  position: relative;
+  z-index: 1;
+  width: 100%;
+  margin-top: auto;
+  background:
+    linear-gradient(180deg, rgba(9, 12, 18, 0.05) 0%, rgba(9, 12, 18, 0.78) 34%, rgba(9, 12, 18, 0.96) 100%);
+}
+
+.album-card__body {
+  padding: 58px 12px 12px;
+}
+
+.album-card__title,
+.album-card__artist,
+.album-card__meta {
+  margin: 0;
+}
+
+.album-card__title {
+  color: var(--text);
+  font-size: 0.92rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.album-card__artist {
+  margin-top: 4px;
+  font-size: 0.72rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.album-card__meta {
+  margin-top: 8px;
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
 .library-stage {
   flex: 1 1 auto;
   min-height: 0;
@@ -395,9 +490,44 @@ button {
   border-radius: 20px;
   overflow: hidden;
   background:
-    linear-gradient(180deg, rgba(7, 5, 6, 0.18) 0%, rgba(7, 5, 6, 0.72) 100%),
-    radial-gradient(circle at right center, rgba(70, 112, 184, 0.14), transparent 28%),
+    linear-gradient(180deg, rgba(8, 7, 10, 0.22) 0%, rgba(6, 7, 10, 0.68) 100%),
+    radial-gradient(circle at right center, rgba(70, 112, 184, 0.12), transparent 30%),
+    radial-gradient(circle at left top, rgba(166, 46, 77, 0.12), transparent 34%),
     linear-gradient(135deg, #251118 0%, #10131b 56%, #06080d 100%);
+}
+
+.library-stage__visual,
+.library-stage__visual-veil {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.library-stage__visual {
+  z-index: 0;
+  opacity: 0.82;
+}
+
+.library-stage__visual-canvas {
+  width: 100%;
+  height: 100%;
+  transform: scale(1.02);
+  filter: saturate(1.08) blur(1.5px);
+  opacity: 0.76;
+}
+
+.library-stage__visual-canvas canvas {
+  display: block;
+  width: 100% !important;
+  height: 100% !important;
+  background: transparent !important;
+}
+
+.library-stage__visual-veil {
+  z-index: 0;
+  background:
+    radial-gradient(circle at center, rgba(123, 70, 90, 0.06), transparent 40%),
+    linear-gradient(180deg, rgba(6, 7, 11, 0.2) 0%, rgba(7, 9, 13, 0.06) 34%, rgba(7, 8, 12, 0.34) 100%);
 }
 
 .library-stage__overlay {
@@ -413,9 +543,10 @@ button {
 .library-stage__overlay h2 {
   font-size: clamp(1.15rem, 2.25vw, 1.95rem);
   line-height: 0.98;
+  width: min(100%, 760px);
   max-width: 100%;
-  text-wrap: balance;
-  overflow-wrap: anywhere;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .library-stage__meta {
@@ -485,18 +616,18 @@ button {
   content: "";
   position: absolute;
   top: 0;
-  width: 4px;
+  width: 5px;
   height: 18px;
   border-radius: 999px;
   background: currentColor;
 }
 
 .transport-glyph--pause::before {
-  left: 3px;
+  left: 2px;
 }
 
 .transport-glyph--pause::after {
-  right: 3px;
+  right: 2px;
 }
 
 .transport-glyph--skip-back::before,
@@ -542,9 +673,14 @@ button {
   min-height: 141px;
 }
 
+.library-stage__album--gallery {
+  flex-direction: column;
+}
+
 .library-stage__album-art {
   display: grid;
   place-items: center;
+  position: relative;
   flex: 0 0 auto;
   align-self: stretch;
   height: 100%;
@@ -558,10 +694,41 @@ button {
   border: 1px solid rgba(117, 148, 192, 0.16);
 }
 
+.library-stage__album-art img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+  border-radius: inherit;
+}
+
 .library-stage__album-art span {
   font-size: 4rem;
   font-weight: 700;
   color: rgba(255, 236, 241, 0.14);
+}
+
+.library-stage__album-art--artist {
+  background:
+    radial-gradient(circle at 22% 18%, rgba(71, 116, 182, 0.18), transparent 30%),
+    linear-gradient(160deg, rgba(25, 18, 29, 0.96), rgba(10, 14, 22, 0.98));
+}
+
+.library-stage__artist-tile {
+  width: 100%;
+  height: 100%;
+  display: grid;
+  place-items: center;
+  padding: 16px;
+  text-align: center;
+}
+
+.library-stage__artist-tile span {
+  font-size: clamp(1.05rem, 2vw, 1.45rem);
+  line-height: 1.1;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: rgba(243, 245, 248, 0.72);
 }
 
 .library-stage__album-content {
@@ -571,6 +738,17 @@ button {
   flex-direction: column;
   gap: 8px;
   padding: 0;
+}
+
+.library-stage__album-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.library-stage__album-head--gallery {
+  padding-right: 4px;
 }
 
 .library-stage__album-head h3 {
@@ -584,6 +762,14 @@ button {
   margin: 4px 0 0;
   color: var(--muted);
   font-size: 0.72rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.library-stage__album-back {
+  flex: 0 0 auto;
+  padding: 8px 10px;
+  font-size: 0.74rem;
   letter-spacing: 0.08em;
   text-transform: uppercase;
 }
@@ -630,8 +816,18 @@ button {
 }
 
 .library-stage__album-title {
+  display: block;
   min-width: 0;
   overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.library-stage__hero-title {
+  width: 100%;
+  min-width: 0;
+  overflow: hidden;
+  text-align: center;
   text-overflow: ellipsis;
   white-space: nowrap;
 }

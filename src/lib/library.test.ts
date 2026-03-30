@@ -8,6 +8,7 @@ const library: LibraryData = {
     {
       id: "1",
       path: "/music/artist-a/album-a/track-1.mp3",
+      artPath: "/music/artist-a/album-a/cover.jpg",
       filename: "track-1.mp3",
       title: "",
       artist: "",
@@ -20,6 +21,7 @@ const library: LibraryData = {
     {
       id: "2",
       path: "/music/artist-a/album-a/track-2.mp3",
+      artPath: "/music/artist-a/album-a/cover.jpg",
       filename: "track-2.mp3",
       title: "Track Two",
       artist: "Artist A",
@@ -45,6 +47,7 @@ describe("library helpers", () => {
     const grouped = groupLibrary(normalizeLibrary(library));
     expect(grouped).toHaveLength(2);
     expect(grouped[0].albums[0].trackCount).toBe(1);
+    expect(grouped[1].albums[0].artPath).toBe("/music/artist-a/album-a/cover.jpg");
   });
 
   it("filters on artist album and title text", () => {

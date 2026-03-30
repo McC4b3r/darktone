@@ -3,6 +3,7 @@ export type RepeatMode = "off" | "all" | "one";
 export interface Track {
   id: string;
   path: string;
+  artPath?: string | null;
   filename: string;
   title: string;
   artist: string;
@@ -17,6 +18,7 @@ export interface Album {
   id: string;
   title: string;
   artist: string;
+  artPath?: string | null;
   tracks: Track[];
   trackCount: number;
   totalDurationMs: number;

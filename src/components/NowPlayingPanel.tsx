@@ -1,3 +1,6 @@
+import { useEffect, useRef } from "react";
+import AudioMotionAnalyzer from "audiomotion-analyzer";
+import { audioEngine } from "../lib/audio";
 import { formatTime } from "../lib/library";
 import type { Album, PlaybackState, Track } from "../lib/types";
 
@@ -18,14 +21,72 @@ export function NowPlayingPanel({
   onPrevious,
   onNext,
 }: NowPlayingPanelProps) {
+  const visualRef = useRef<HTMLDivElement>(null);
+  const analyzerRef = useRef<AudioMotionAnalyzer | null>(null);
   const remaining = Math.max(playback.duration - playback.currentTime, 0);
+
+  useEffect(() => {
+    if (!visualRef.current || analyzerRef.current) return;
+
+    const analyzer = new AudioMotionAnalyzer(visualRef.current, {
+      audioCtx: audioEngine.getAudioContext(),
+      source: audioEngine.getAnalyzerInputNode(),
+      connectSpeakers: false,
+      height: 168,
+      fftSize: 8192,
+      mode: 10,
+      colorMode: "bar-level",
+      lineWidth: 2,
+      fillAlpha: 0.2,
+      overlay: true,
+      bgAlpha: 0.7,
+      reflexFit: true,
+      showScaleX: false,
+      showScaleY: false,
+      showPeaks: true,
+      peakLine: false,
+      fadePeaks: false,
+      gravity: 3.8,
+      peakFadeTime: 750,
+      peakHoldTime: 500,
+      reflexRatio: 0.4,
+      reflexAlpha: 1,
+      reflexBright: 1,
+      mirror: -1,
+      smoothing: 0.7,
+      minFreq: 20,
+      maxFreq: 8000,
+      minDecibels: -85,
+      maxDecibels: -25,
+      gradient: "rainbow",
+      frequencyScale: "log",
+      weightingFilter: "D",
+      linearAmplitude: true,
+      linearBoost: 1.6,
+      maxFPS: 0,
+    });
+    analyzer.canvas.style.background = "transparent";
+    analyzer.canvas.parentElement?.style.setProperty("background", "transparent");
+    analyzerRef.current = analyzer;
+
+    return () => {
+      analyzer.destroy();
+      analyzerRef.current = null;
+    };
+  }, []);
 
   return (
     <div className="library-stage__hero">
       <div className="library-stage__details panel">
+        <div className="library-stage__visual" aria-hidden="true">
+          <div ref={visualRef} className="library-stage__visual-canvas" />
+        </div>
+        <div className="library-stage__visual-veil" aria-hidden="true" />
         <div className="library-stage__overlay">
           <p className="eyebrow">Now Playing</p>
-          <h2>{track?.title ?? album.title}</h2>
+          <h2 className="library-stage__hero-title" title={track?.title ?? album.title}>
+            {track?.title ?? album.title}
+          </h2>
           <p className="library-stage__meta">{track?.artist ?? album.artist}</p>
           <p className="library-stage__submeta">
             {album.title} • {track?.format.toUpperCase() ?? "LOCAL"} • {formatTime(remaining)} left

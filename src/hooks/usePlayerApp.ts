@@ -84,13 +84,18 @@ export function usePlayerApp() {
   const visibleAlbums = selectedArtist ? selectedArtist.albums : allAlbums;
   const selectedAlbum =
     visibleAlbums.find((album) => album.id === selectedAlbumId) ??
-    selectedArtist?.albums[0] ??
-    visibleAlbums[0] ??
+    (!selectedArtist ? visibleAlbums[0] : null) ??
     null;
 
-  const visibleTracks = selectedAlbum?.tracks ?? filteredLibrary.tracks;
+  const visibleTracks =
+    selectedAlbum?.tracks ??
+    (selectedArtist ? selectedArtist.albums.flatMap((artistAlbum) => artistAlbum.tracks) : filteredLibrary.tracks);
   const currentTrack =
     currentIndex >= 0 ? tracksById.get(queue[currentIndex]?.trackId ?? "") ?? null : null;
+  const currentAlbum =
+    (currentTrack ? allAlbums.find((album) => album.tracks.some((track) => track.id === currentTrack.id)) ?? null : null) ??
+    selectedAlbum ??
+    (selectedArtist?.albums[0] ?? null);
 
   useEffect(() => {
     audioEngine.setCallbacks({
@@ -320,7 +325,22 @@ export function usePlayerApp() {
         await playTrack(visibleTracks[0], visibleTracks);
         return;
       }
-      await audioEngine.toggle();
+
+      if (!currentTrack && queue.length) {
+        await playQueueIndex(Math.max(currentIndex, 0));
+        return;
+      }
+
+      if (!currentTrack) {
+        return;
+      }
+
+      if (playback.isPlaying) {
+        audioEngine.pause();
+        return;
+      }
+
+      await audioEngine.resume(currentTrack, playback.currentTime);
     } catch (cause) {
       console.error(cause);
       setError(getErrorMessage(cause, "Playback failed"));
@@ -440,7 +460,9 @@ export function usePlayerApp() {
     allAlbums,
     visibleAlbums,
     visibleTracks,
+    selectedArtist,
     selectedAlbum,
+    currentAlbum,
     selectedArtistId,
     selectedAlbumId,
     currentIndex,

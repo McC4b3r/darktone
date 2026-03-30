@@ -26,6 +26,7 @@ const SETTINGS_FILE: &str = "settings.json";
 struct Track {
     id: String,
     path: String,
+    art_path: Option<String>,
     filename: String,
     title: String,
     artist: String,
@@ -119,6 +120,54 @@ fn supported_file(path: &Path) -> bool {
             lowered == "mp3" || lowered == "wav" || lowered == "flac"
         })
         .unwrap_or(false)
+}
+
+fn supported_art_file(path: &Path) -> bool {
+    path.extension()
+        .and_then(|value| value.to_str())
+        .map(|extension| {
+            matches!(
+                extension.to_ascii_lowercase().as_str(),
+                "jpg" | "jpeg" | "png" | "webp"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn art_priority(path: &Path) -> usize {
+    let filename = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+
+    match filename.as_str() {
+        "cover.jpg" | "cover.jpeg" | "cover.png" | "cover.webp" => 0,
+        "folder.jpg" | "folder.jpeg" | "folder.png" | "folder.webp" => 1,
+        "front.jpg" | "front.jpeg" | "front.png" | "front.webp" => 2,
+        _ => 3,
+    }
+}
+
+fn find_album_art(path: &Path) -> Option<String> {
+    let parent = path.parent()?;
+    let mut art_files = fs::read_dir(parent)
+        .ok()?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|candidate| candidate.is_file() && supported_art_file(candidate))
+        .collect::<Vec<_>>();
+
+    art_files.sort_by(|a, b| {
+        art_priority(a)
+            .cmp(&art_priority(b))
+            .then_with(|| a.file_name().cmp(&b.file_name()))
+    });
+
+    art_files
+        .into_iter()
+        .next()
+        .map(|candidate| candidate.to_string_lossy().to_string())
 }
 
 fn value_to_string(value: &Value) -> Option<String> {
@@ -219,6 +268,7 @@ fn inspect_audio_file(path: &Path) -> Result<Track, String> {
     let track = Track {
         id: full_path.clone(),
         path: full_path,
+        art_path: find_album_art(path),
         filename,
         title,
         artist,

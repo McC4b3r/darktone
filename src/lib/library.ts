@@ -8,9 +8,21 @@ function normalizeValue(value: string | null | undefined, fallback: string) {
   return trimmed ? trimmed : fallback;
 }
 
+function pickAlbumArtPath(tracks: Track[]) {
+  for (const track of tracks) {
+    const artPath = track.artPath?.trim();
+    if (artPath) {
+      return artPath;
+    }
+  }
+
+  return null;
+}
+
 export function normalizeTrack(track: Track): Track {
   return {
     ...track,
+    artPath: track.artPath?.trim() || null,
     title: normalizeValue(track.title, track.filename),
     artist: normalizeValue(track.artist, UNKNOWN_ARTIST),
     album: normalizeValue(track.album, UNKNOWN_ALBUM),
@@ -64,6 +76,7 @@ export function groupLibrary(library: LibraryData): ArtistGroup[] {
             id: `${artistName}::${albumTitle}`,
             title: albumTitle,
             artist: artistName,
+            artPath: pickAlbumArtPath(sortedTracks),
             tracks: sortedTracks,
             trackCount: sortedTracks.length,
             totalDurationMs: sortedTracks.reduce((sum, track) => sum + track.durationMs, 0),

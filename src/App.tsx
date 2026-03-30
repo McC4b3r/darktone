@@ -13,7 +13,9 @@ export default function App() {
     error,
     artists,
     visibleAlbums,
+    selectedArtist,
     selectedAlbum,
+    currentAlbum,
     selectedArtistId,
     selectedAlbumId,
     currentTrack,
@@ -37,7 +39,6 @@ export default function App() {
     removeFromQueue,
     setVolume,
     toggleMute,
-    toggleShuffle,
     seek,
   } = usePlayerApp();
 
@@ -119,12 +120,15 @@ export default function App() {
         ) : (
           <>
             <LibraryStage
+              artist={selectedArtist}
               album={selectedAlbum}
+              nowPlayingAlbum={currentAlbum}
               track={currentTrack}
               playback={playback}
               onTogglePlay={() => void togglePlay()}
               onPrevious={() => void playPrevious()}
               onNext={() => void playNext()}
+              onSelectAlbum={setSelectedAlbumId}
               onSelectTrack={(track, albumTracks) => void playTrack(track, albumTracks)}
             />
           </>
@@ -147,7 +151,6 @@ export default function App() {
         onSeek={seek}
         onVolumeChange={setVolume}
         onToggleMute={toggleMute}
-        onToggleShuffle={toggleShuffle}
       />
     </div>
   );

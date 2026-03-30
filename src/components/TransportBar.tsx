@@ -7,7 +7,6 @@ interface TransportBarProps {
   onSeek: (seconds: number) => void;
   onVolumeChange: (volume: number) => void;
   onToggleMute: () => void;
-  onToggleShuffle: () => void;
 }
 
 export function TransportBar({
@@ -15,7 +14,6 @@ export function TransportBar({
   onSeek,
   onVolumeChange,
   onToggleMute,
-  onToggleShuffle,
 }: TransportBarProps) {
   const timelineMax = Math.max(playback.duration, 1);
   const timelineValue = Math.min(playback.currentTime, playback.duration || 0);
@@ -46,9 +44,6 @@ export function TransportBar({
       </div>
 
       <div className="transport__volume">
-        <button className="icon-button" onClick={onToggleShuffle} data-active={playback.shuffle}>
-          Mix
-        </button>
         <button className="icon-button" onClick={onToggleMute}>
           {playback.muted ? "Muted" : "Volume"}
         </button>
