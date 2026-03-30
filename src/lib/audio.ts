@@ -1,3 +1,4 @@
+import { convertFileSrc } from "@tauri-apps/api/core";
 import { readFile } from "@tauri-apps/plugin-fs";
 import type { Track } from "./types";
 
@@ -42,7 +43,7 @@ export class AudioEngine {
     });
 
     this.audio.addEventListener("error", () => {
-      const message = this.audio.error?.message || "Audio playback failed.";
+      const message = this.describeMediaError();
       this.callbacks.onError?.(message);
     });
   }
@@ -116,6 +117,26 @@ export class AudioEngine {
     }
   }
 
+  private describeMediaError() {
+    const error = this.audio.error;
+    if (!error) {
+      return "Audio playback failed.";
+    }
+
+    const codeLabel =
+      error.code === MediaError.MEDIA_ERR_ABORTED
+        ? "media load aborted"
+        : error.code === MediaError.MEDIA_ERR_NETWORK
+          ? "network error while loading media"
+          : error.code === MediaError.MEDIA_ERR_DECODE
+            ? "media decode error"
+            : error.code === MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED
+              ? "no supported source was found"
+              : "unknown media error";
+
+    return error.message ? `${codeLabel}: ${error.message}` : codeLabel;
+  }
+
   private getMimeType(track: Track) {
     if (track.format === "mp3") return "audio/mpeg";
     if (track.format === "wav") return "audio/wav";
@@ -123,14 +144,63 @@ export class AudioEngine {
     return "application/octet-stream";
   }
 
+  private async waitForLoadResult() {
+    if (this.audio.readyState >= HTMLMediaElement.HAVE_METADATA) {
+      return;
+    }
+
+    await new Promise<void>((resolve, reject) => {
+      const handleLoadedMetadata = () => {
+        cleanup();
+        resolve();
+      };
+      const handleCanPlay = () => {
+        cleanup();
+        resolve();
+      };
+      const handleError = () => {
+        cleanup();
+        reject(new Error(this.describeMediaError()));
+      };
+      const cleanup = () => {
+        this.audio.removeEventListener("loadedmetadata", handleLoadedMetadata);
+        this.audio.removeEventListener("canplay", handleCanPlay);
+        this.audio.removeEventListener("error", handleError);
+      };
+
+      this.audio.addEventListener("loadedmetadata", handleLoadedMetadata, { once: true });
+      this.audio.addEventListener("canplay", handleCanPlay, { once: true });
+      this.audio.addEventListener("error", handleError, { once: true });
+    });
+  }
+
+  private async assignSource(src: string) {
+    this.audio.pause();
+    this.audio.src = src;
+    this.audio.load();
+    await this.waitForLoadResult();
+  }
+
   async load(track: Track, autoPlay = true) {
     this.revokeObjectUrl();
-    const bytes = await readFile(track.path);
-    const blob = new Blob([bytes], { type: this.getMimeType(track) });
-    this.objectUrl = URL.createObjectURL(blob);
     this.loadedTrackId = track.id;
-    this.audio.src = this.objectUrl;
-    this.audio.load();
+
+    let directSourceError: Error | null = null;
+    try {
+      await this.assignSource(convertFileSrc(track.path));
+    } catch (error) {
+      directSourceError = error instanceof Error ? error : new Error("Direct file playback failed.");
+      const bytes = await readFile(track.path);
+      const blob = new Blob([bytes], { type: this.getMimeType(track) });
+      this.objectUrl = URL.createObjectURL(blob);
+      try {
+        await this.assignSource(this.objectUrl);
+      } catch (blobError) {
+        const fallbackMessage = blobError instanceof Error ? blobError.message : "Blob playback failed.";
+        throw new Error(`${directSourceError.message}; fallback also failed: ${fallbackMessage}`);
+      }
+    }
+
     if (this.getAudioContext().state === "suspended") {
       await this.audioContext?.resume();
     }

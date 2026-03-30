@@ -15,7 +15,10 @@ use symphonia::{
     },
     default::{get_codecs, get_probe},
 };
-use tauri::{AppHandle, Manager};
+use tauri::{
+    menu::{Menu, MenuItem, PredefinedMenuItem, Submenu},
+    AppHandle, Emitter, Manager,
+};
 use walkdir::WalkDir;
 
 const LIBRARY_FILE: &str = "library.json";
@@ -50,6 +53,9 @@ struct LibraryScanResult {
     library: LibraryData,
     scanned_files: usize,
     skipped_files: usize,
+    unsupported_files: usize,
+    unreadable_entries: usize,
+    unreadable_audio_files: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -290,24 +296,36 @@ async fn scan_library(app: AppHandle, folders: Vec<String>) -> Result<LibrarySca
         let mut seen_paths = HashSet::new();
         let mut scanned_files = 0usize;
         let mut skipped_files = 0usize;
+        let mut unsupported_files = 0usize;
+        let mut unreadable_entries = 0usize;
+        let mut unreadable_audio_files = 0usize;
 
         for folder in folders {
-            for entry in WalkDir::new(folder)
-                .follow_links(true)
-                .into_iter()
-                .filter_map(Result::ok)
-                .filter(|entry| entry.file_type().is_file())
-            {
-                let path = entry.path();
-                if !supported_file(path) {
-                    skipped_files += 1;
+            for entry in WalkDir::new(folder).follow_links(true).into_iter() {
+                let entry = match entry {
+                    Ok(entry) => entry,
+                    Err(_) => {
+                        skipped_files += 1;
+                        unreadable_entries += 1;
+                        continue;
+                    }
+                };
+
+                if !entry.file_type().is_file() {
                     continue;
                 }
 
-                 let dedupe_key = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-                 if !seen_paths.insert(dedupe_key) {
+                let path = entry.path();
+                if !supported_file(path) {
+                    skipped_files += 1;
+                    unsupported_files += 1;
                     continue;
-                 }
+                }
+
+                let dedupe_key = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+                if !seen_paths.insert(dedupe_key) {
+                    continue;
+                }
 
                 match inspect_audio_file(path) {
                     Ok(track) => {
@@ -316,6 +334,7 @@ async fn scan_library(app: AppHandle, folders: Vec<String>) -> Result<LibrarySca
                     }
                     Err(_) => {
                         skipped_files += 1;
+                        unreadable_audio_files += 1;
                     }
                 }
             }
@@ -337,6 +356,9 @@ async fn scan_library(app: AppHandle, folders: Vec<String>) -> Result<LibrarySca
             library,
             scanned_files,
             skipped_files,
+            unsupported_files,
+            unreadable_entries,
+            unreadable_audio_files,
         })
     })
     .await
@@ -378,8 +400,21 @@ fn load_settings(app: AppHandle) -> Result<AppSettings, String> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .setup(|app| {
+            let open = MenuItem::with_id(app, "file_open", "Open", true, Some("CmdOrCtrl+O"))?;
+            let quit = PredefinedMenuItem::quit(app, Some("Quit"))?;
+            let file_menu = Submenu::with_items(app, "File", true, &[&open, &quit])?;
+            let menu = Menu::with_items(app, &[&file_menu])?;
+            app.set_menu(menu)?;
+            Ok(())
+        })
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
+        .on_menu_event(|app, event| {
+            if event.id().as_ref() == "file_open" {
+                let _ = app.emit("menu-open", ());
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             scan_library,
             load_library,

@@ -90,8 +90,9 @@ export function usePlayerApp() {
   const visibleTracks =
     selectedAlbum?.tracks ??
     (selectedArtist ? selectedArtist.albums.flatMap((artistAlbum) => artistAlbum.tracks) : filteredLibrary.tracks);
+  const queuedTrack = currentIndex >= 0 ? tracksById.get(queue[currentIndex]?.trackId ?? "") ?? null : null;
   const currentTrack =
-    currentIndex >= 0 ? tracksById.get(queue[currentIndex]?.trackId ?? "") ?? null : null;
+    (playback.currentTrackId ? tracksById.get(playback.currentTrackId) ?? null : null) ?? queuedTrack;
   const currentAlbum =
     (currentTrack ? allAlbums.find((album) => album.tracks.some((track) => track.id === currentTrack.id)) ?? null : null) ??
     selectedAlbum ??
@@ -223,8 +224,18 @@ export function usePlayerApp() {
 
       setLibrary(normalized);
       const indexedMessage = `Indexed ${result.scannedFiles} files from ${folders.length} folder${folders.length === 1 ? "" : "s"}.`;
-      const skippedMessage =
-        result.skippedFiles > 0 ? ` ${result.skippedFiles} files were skipped because only MP3, WAV, and FLAC are supported right now.` : "";
+      const skippedParts = [
+        result.unsupportedFiles > 0
+          ? `${result.unsupportedFiles} skipped because only MP3, WAV, and FLAC are supported right now`
+          : null,
+        result.unreadableEntries > 0
+          ? `${result.unreadableEntries} folders or files could not be traversed`
+          : null,
+        result.unreadableAudioFiles > 0
+          ? `${result.unreadableAudioFiles} audio files could not be opened or parsed`
+          : null,
+      ].filter(Boolean);
+      const skippedMessage = skippedParts.length > 0 ? ` ${skippedParts.join(". ")}.` : "";
       setSyncMessage(`${indexedMessage}${skippedMessage}`);
 
       const validQueueTrackIds = queue

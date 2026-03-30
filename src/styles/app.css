@@ -52,8 +52,9 @@ button {
 }
 
 .app-shell {
+  --sidebar-width: clamp(200px, 20vw, 242px);
   display: grid;
-  grid-template-columns: clamp(200px, 20vw, 242px) minmax(0, 1fr) 48px;
+  grid-template-columns: var(--sidebar-width) minmax(0, 1fr) 48px;
   grid-template-rows: minmax(0, 1fr) auto;
   gap: 10px;
   height: 100vh;
@@ -83,8 +84,36 @@ button {
 .sidebar {
   display: flex;
   flex-direction: column;
-  padding: 12px;
   overflow: hidden;
+  min-width: 0;
+  position: relative;
+}
+
+.sidebar--collapsed {
+  padding: 0;
+}
+
+.sidebar__viewport {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+}
+
+.sidebar__pane {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.sidebar__pane--expanded {
+  padding: 12px;
+}
+
+.sidebar__pane--collapsed {
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
 }
 
 .content {
@@ -166,6 +195,23 @@ button {
   margin-bottom: 12px;
 }
 
+.sidebar__section-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.sidebar__section-title {
+  margin: 2px 0 0;
+  color: var(--muted);
+  font-size: 0.84rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
 .sidebar__section--grow {
   flex: 1;
   overflow: hidden;
@@ -180,6 +226,20 @@ button {
   gap: 8px;
 }
 
+.sidebar__collapse-toggle,
+.sidebar__collapsed-action {
+  display: grid;
+  place-items: center;
+}
+
+.sidebar__collapse-toggle {
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border-radius: 999px;
+  flex: 0 0 auto;
+}
+
 .field {
   display: flex;
   flex-direction: column;
@@ -191,6 +251,7 @@ button {
   font-size: 0.83rem;
   text-transform: uppercase;
   letter-spacing: 0.12em;
+  white-space: nowrap;
 }
 
 .input,
@@ -248,6 +309,145 @@ button {
   display: flex;
   justify-content: space-between;
   font-size: 0.9rem;
+  gap: 10px;
+}
+
+.sidebar__meta span {
+  min-width: 0;
+  white-space: nowrap;
+}
+
+.sidebar__collapsed-action {
+  width: 56px;
+  height: 56px;
+  padding: 0;
+  border-radius: 999px;
+}
+
+.sidebar__dock-button {
+  position: relative;
+  width: 56px;
+  height: 56px;
+  padding: 0;
+  border-radius: 20px;
+  background:
+    linear-gradient(180deg, rgba(45, 31, 39, 0.98), rgba(15, 19, 27, 0.96)),
+    radial-gradient(circle at top, rgba(255, 255, 255, 0.05), transparent 52%);
+  border: 1px solid rgba(190, 204, 227, 0.12);
+  box-shadow:
+    0 12px 24px rgba(0, 0, 0, 0.22),
+    inset 0 1px 0 rgba(255, 255, 255, 0.05);
+}
+
+.sidebar__dock-button + .sidebar__dock-button {
+  margin-top: 14px;
+}
+
+.sidebar__dock-button:hover {
+  transform: translateY(-1px) scale(1.02);
+  border-color: rgba(207, 40, 71, 0.28);
+}
+
+.sidebar__dock-button::after {
+  content: "";
+  position: absolute;
+  inset: 1px;
+  border-radius: inherit;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.04), transparent 42%);
+  pointer-events: none;
+}
+
+.sidebar__dock-icon {
+  position: relative;
+  display: inline-block;
+  width: 22px;
+  height: 22px;
+  color: #f3f5f8;
+}
+
+.sidebar__dock-icon--expand::before,
+.sidebar__dock-icon--expand::after,
+.sidebar__dock-icon--door::before,
+.sidebar__dock-icon--door::after,
+.sidebar__dock-icon--search::before,
+.sidebar__dock-icon--search::after {
+  content: "";
+  position: absolute;
+}
+
+.sidebar__dock-icon--expand::before {
+  inset: 6px 4px 6px 8px;
+  border-top: 2px solid currentColor;
+  border-left: 2px solid currentColor;
+  transform: skewX(-8deg);
+}
+
+.sidebar__dock-icon--expand::after {
+  width: 8px;
+  height: 8px;
+  top: 6px;
+  left: 4px;
+  border-top: 2px solid currentColor;
+  border-left: 2px solid currentColor;
+  transform: rotate(-45deg);
+}
+
+.sidebar__dock-icon--door::before {
+  width: 9px;
+  height: 9px;
+  top: 6px;
+  left: 5px;
+  border-top: 2px solid currentColor;
+  border-right: 2px solid currentColor;
+  transform: rotate(45deg);
+}
+
+.sidebar__dock-icon--door::after {
+  display: none;
+}
+
+.sidebar__dock-icon--search::before {
+  width: 12px;
+  height: 12px;
+  top: 2px;
+  left: 2px;
+  border: 2px solid currentColor;
+  border-radius: 999px;
+}
+
+.sidebar__dock-icon--search::after {
+  width: 8px;
+  height: 2px;
+  right: 1px;
+  bottom: 3px;
+  background: currentColor;
+  border-radius: 999px;
+  transform: rotate(45deg);
+  transform-origin: right center;
+}
+
+.sidebar__collapsed-caption {
+  margin-top: auto;
+  padding-bottom: 2px;
+  position: relative;
+  z-index: 1;
+}
+
+.sidebar__collapsed-caption span {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 40px;
+  height: 22px;
+  padding: 0 8px;
+  border-radius: 999px;
+  background: rgba(15, 18, 26, 0.8);
+  border: 1px solid rgba(187, 200, 225, 0.1);
+  color: rgba(219, 226, 237, 0.72);
+  font-size: 0.6rem;
+  font-weight: 700;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
 }
 
 .artist-list {
@@ -286,6 +486,8 @@ button {
   align-items: center;
   gap: 8px;
   min-width: 0;
+  flex: 1 1 auto;
+  white-space: nowrap;
 }
 
 .tree-caret {
@@ -314,10 +516,20 @@ button {
   border: 1px solid transparent;
   border-radius: 10px;
   text-align: left;
+  gap: 10px;
+  min-width: 0;
 }
 
 .sub-nav-item {
   padding-left: 8px;
+}
+
+.nav-item > span:first-child,
+.sub-nav-item > span:first-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .tree-leaf {
@@ -359,6 +571,8 @@ button {
 .nav-item__meta {
   color: var(--muted);
   font-family: "SFMono-Regular", "IBM Plex Mono", monospace;
+  flex: 0 0 auto;
+  white-space: nowrap;
 }
 
 .album-grid {
@@ -1112,6 +1326,25 @@ button {
     grid-template-columns: 1fr;
   }
 
+  .sidebar--collapsed {
+    padding: 0;
+  }
+
+  .sidebar__pane--collapsed {
+    align-items: stretch;
+    gap: 10px;
+  }
+
+  .sidebar__dock-button + .sidebar__dock-button {
+    margin-top: 0;
+  }
+
+  .sidebar__collapsed-caption {
+    padding-bottom: 0;
+    display: flex;
+    justify-content: center;
+  }
+
   .library-stage__stats {
     grid-template-columns: repeat(auto-fit, minmax(96px, 1fr));
     width: 100%;
@@ -1132,5 +1365,11 @@ button {
     width: 100%;
     max-width: 220px;
     align-self: flex-start;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sidebar__dock-button {
+    transition: none;
   }
 }

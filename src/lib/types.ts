@@ -40,6 +40,9 @@ export interface LibraryScanResult {
   library: LibraryData;
   scannedFiles: number;
   skippedFiles: number;
+  unsupportedFiles: number;
+  unreadableEntries: number;
+  unreadableAudioFiles: number;
 }
 
 export interface QueueItem {
