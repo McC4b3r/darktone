@@ -4,7 +4,8 @@ import type { Track } from "./types";
 const mockReadAudioFile = vi.fn<[string], Promise<number[]>>();
 const mockDecodeAudioForPlayback = vi.fn<[string], Promise<number[]>>();
 const mockConvertFileSrc = vi.fn((path: string) => `file://${path}`);
-const createObjectURL = vi.fn((blob: Blob) => `blob:${blob.type}:${Math.random().toString(16).slice(2)}`);
+let blobUrlCounter = 0;
+const createObjectURL = vi.fn((blob: Blob) => `blob:${blob.type}:${blobUrlCounter++}`);
 const revokeObjectURL = vi.fn();
 
 vi.mock("./tauri", () => ({
@@ -162,6 +163,7 @@ beforeEach(() => {
   createObjectURL.mockClear();
   revokeObjectURL.mockClear();
   FakeAudio.failures.clear();
+  blobUrlCounter = 0;
 
   vi.stubGlobal("Audio", FakeAudio);
   vi.stubGlobal("AudioContext", FakeAudioContext);
@@ -232,6 +234,54 @@ describe("AudioEngine", () => {
     expect((createObjectURL.mock.calls[0]?.[0] as Blob).type).toBe("audio/mpeg");
   });
 
+  it("uses decoded fallback after direct and blob failures when both are unsupported-source errors", async () => {
+    mockReadAudioFile.mockResolvedValue([1, 2, 3]);
+    mockDecodeAudioForPlayback.mockResolvedValue([10, 20, 30, 40]);
+    FakeAudio.failures.set(`file://${mp3Track.path}`, {
+      code: 4,
+      message: "PipelineStatus::DEMUXER_ERROR_COULD_NOT_OPEN: FFmpegDemuxer: open context failed",
+    });
+    FakeAudio.failures.set("blob:audio/mpeg:0", {
+      code: 4,
+      message: "PipelineStatus::DEMUXER_ERROR_COULD_NOT_OPEN: FFmpegDemuxer: open context failed",
+    });
+
+    const { AudioEngine } = await import("./audio");
+    const engine = new AudioEngine();
+
+    await engine.load(mp3Track, false);
+
+    expect(mockConvertFileSrc).toHaveBeenCalledWith(mp3Track.path);
+    expect(mockReadAudioFile).toHaveBeenCalledWith(mp3Track.path);
+    expect(mockDecodeAudioForPlayback).toHaveBeenCalledWith(mp3Track.path);
+    expect(createObjectURL).toHaveBeenCalledTimes(2);
+    expect((createObjectURL.mock.calls[1]?.[0] as Blob).type).toBe("audio/wav");
+  });
+
+  it("uses decoded fallback as a final recovery path when direct and blob playback both fail", async () => {
+    mockReadAudioFile.mockResolvedValue([1, 2, 3]);
+    mockDecodeAudioForPlayback.mockResolvedValue([10, 20, 30, 40]);
+    FakeAudio.failures.set(`file://${mp3Track.path}`, {
+      code: 2,
+      message: "network error while loading media",
+    });
+    FakeAudio.failures.set("blob:audio/mpeg:0", {
+      code: 3,
+      message: "media decode error",
+    });
+
+    const { AudioEngine } = await import("./audio");
+    const engine = new AudioEngine();
+
+    await engine.load(mp3Track, false);
+
+    expect(mockConvertFileSrc).toHaveBeenCalledWith(mp3Track.path);
+    expect(mockReadAudioFile).toHaveBeenCalledWith(mp3Track.path);
+    expect(mockDecodeAudioForPlayback).toHaveBeenCalledWith(mp3Track.path);
+    expect(createObjectURL).toHaveBeenCalledTimes(2);
+    expect((createObjectURL.mock.calls[1]?.[0] as Blob).type).toBe("audio/wav");
+  });
+
   it("revokes the previous object URL when switching tracks after a fallback load", async () => {
     mockDecodeAudioForPlayback.mockResolvedValue([10, 20, 30, 40]);
 
@@ -243,5 +293,25 @@ describe("AudioEngine", () => {
 
     expect(revokeObjectURL).toHaveBeenCalled();
     expect(mockDecodeAudioForPlayback).toHaveBeenCalledTimes(1);
+  });
+
+  it("reset clears the active source and startup state after a fallback load", async () => {
+    mockDecodeAudioForPlayback.mockResolvedValue([10, 20, 30, 40]);
+
+    const { AudioEngine } = await import("./audio");
+    const engine = new AudioEngine();
+
+    await engine.load(flacTrack, false);
+    const mediaElement = engine.getMediaElement() as FakeAudio;
+    mediaElement.currentTime = 42;
+
+    engine.reset();
+
+    expect(revokeObjectURL).toHaveBeenCalled();
+    expect(mediaElement.src).toBe("");
+    expect(mediaElement.currentSrc).toBe("");
+    expect(mediaElement.currentTime).toBe(0);
+    expect((engine as unknown as { loadedTrackId: string | null }).loadedTrackId).toBeNull();
+    expect((engine as unknown as { loadingSource: boolean }).loadingSource).toBe(false);
   });
 });

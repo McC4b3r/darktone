@@ -158,6 +158,17 @@ export default function App() {
             }
       }
     >
+      {settings.musicFolders.length && (loading || isSyncing) ? (
+        <div className="sync-status-layer">
+          <SyncStatusCard
+            loading={loading}
+            isSyncing={isSyncing}
+            message={syncMessage}
+            progress={scanProgress}
+          />
+        </div>
+      ) : null}
+
       <Sidebar
         artists={artists}
         selectedArtistId={selectedArtistId}
@@ -180,15 +191,6 @@ export default function App() {
 
       <main className="content">
         {error ? <div className="error-banner panel">{error}</div> : null}
-
-        {settings.musicFolders.length ? (
-          <SyncStatusCard
-            loading={loading}
-            isSyncing={isSyncing}
-            message={syncMessage}
-            progress={scanProgress}
-          />
-        ) : null}
 
         {!settings.musicFolders.length ? (
           <EmptyState

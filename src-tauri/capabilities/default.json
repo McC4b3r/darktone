@@ -8,6 +8,8 @@
     "dialog:default",
     "dialog:allow-open",
     "fs:default",
+    "fs:allow-watch",
+    "fs:allow-unwatch",
     {
       "identifier": "fs:allow-read-file",
       "allow": [

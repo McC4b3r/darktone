@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
+import { watch } from "@tauri-apps/plugin-fs";
 import type { AppSettings, LibraryData, LibraryScanResult } from "./types";
 
 export const LIBRARY_SCAN_PROGRESS_EVENT = "library-scan-progress";
@@ -40,4 +41,24 @@ export async function readAudioFile(path: string) {
 
 export async function decodeAudioForPlayback(path: string) {
   return invoke<number[]>("decode_audio_for_playback", { path });
+}
+
+export async function watchMusicFolders(folders: string[], onChange: () => void) {
+  const unwatchers = await Promise.all(
+    folders.map((folder) =>
+      watch(
+        folder,
+        () => {
+          onChange();
+        },
+        { recursive: true, delayMs: 500 },
+      ),
+    ),
+  );
+
+  return () => {
+    for (const unwatch of unwatchers) {
+      unwatch();
+    }
+  };
 }

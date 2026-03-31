@@ -9,7 +9,7 @@ import {
   UNKNOWN_ARTIST,
 } from "../lib/library";
 import { getNextQueueIndex, getPreviousQueueIndex, makeQueue, moveQueueItem, removeQueueItem } from "../lib/queue";
-import { LIBRARY_SCAN_PROGRESS_EVENT, loadLibrary, loadSettings, pickMusicFolders, saveSettings, scanLibrary } from "../lib/tauri";
+import { LIBRARY_SCAN_PROGRESS_EVENT, loadLibrary, loadSettings, pickMusicFolders, saveSettings, scanLibrary, watchMusicFolders } from "../lib/tauri";
 import type { AppSettings, LibraryData, LibraryScanProgress, PlaybackState, QueueItem, RepeatMode, Track } from "../lib/types";
 
 const DEFAULT_SETTINGS: AppSettings = {
@@ -124,6 +124,8 @@ export function usePlayerApp() {
   });
 
   const hasInitializedRef = useRef(false);
+  const refreshTimeoutRef = useRef<number | null>(null);
+  const unwatchFoldersRef = useRef<(() => void) | null>(null);
 
   const normalizedLibrary = useMemo(() => normalizeLibrary(library), [library]);
   const filteredLibrary = useMemo(
@@ -203,6 +205,47 @@ export function usePlayerApp() {
   }, []);
 
   useEffect(() => {
+    if (!hasInitializedRef.current || settings.musicFolders.length === 0) {
+      unwatchFoldersRef.current?.();
+      unwatchFoldersRef.current = null;
+      return;
+    }
+
+    let disposed = false;
+
+    void watchMusicFolders(settings.musicFolders, () => {
+      if (disposed) return;
+      if (refreshTimeoutRef.current !== null) {
+        window.clearTimeout(refreshTimeoutRef.current);
+      }
+      refreshTimeoutRef.current = window.setTimeout(() => {
+        refreshTimeoutRef.current = null;
+        void refreshLibrary(settings.musicFolders, false);
+      }, 900);
+    }).then((unwatch) => {
+      if (disposed) {
+        unwatch();
+        return;
+      }
+
+      unwatchFoldersRef.current?.();
+      unwatchFoldersRef.current = unwatch;
+    }).catch((cause) => {
+      console.warn("Could not watch the music folders for updates.", cause);
+    });
+
+    return () => {
+      disposed = true;
+      if (refreshTimeoutRef.current !== null) {
+        window.clearTimeout(refreshTimeoutRef.current);
+        refreshTimeoutRef.current = null;
+      }
+      unwatchFoldersRef.current?.();
+      unwatchFoldersRef.current = null;
+    };
+  }, [refreshLibrary, settings.musicFolders]);
+
+  useEffect(() => {
     async function refreshOnFocus() {
       if (!hasInitializedRef.current || settings.musicFolders.length === 0) return;
       await refreshLibrary(settings.musicFolders, false);
@@ -225,7 +268,7 @@ export function usePlayerApp() {
       window.removeEventListener("focus", onWindowFocus);
       document.removeEventListener("visibilitychange", onVisibilityChange);
     };
-  }, [settings.musicFolders]);
+  }, [refreshLibrary, settings.musicFolders]);
 
   useEffect(() => {
     audioEngine.setVolume(playback.volume);
@@ -256,17 +299,31 @@ export function usePlayerApp() {
   async function initialize() {
     try {
       setLoading(true);
+      setError(null);
+      audioEngine.reset();
       const [storedSettings, storedLibrary] = await Promise.all([
         loadSettings().catch(() => DEFAULT_SETTINGS),
         loadLibrary().catch(() => EMPTY_LIBRARY),
       ]);
 
       const nextLibrary = normalizeLibrary(storedLibrary);
+      const restoredCurrentTrack =
+        storedSettings.currentTrackId && nextLibrary.tracks.some((track) => track.id === storedSettings.currentTrackId)
+          ? storedSettings.currentTrackId
+          : null;
+      logPlaybackDebug("restoring startup state", {
+        restoredCurrentTrackId: restoredCurrentTrack,
+        restoredQueueCount: storedSettings.queueTrackIds.length,
+        musicFolderCount: storedSettings.musicFolders.length,
+      });
       setSettings(storedSettings);
       setLibrary(nextLibrary);
       setPlayback((state) => ({
         ...state,
-        currentTrackId: storedSettings.currentTrackId,
+        currentTrackId: restoredCurrentTrack,
+        currentTime: 0,
+        duration: 0,
+        isPlaying: false,
         volume: storedSettings.volume,
         muted: storedSettings.muted,
         repeatMode: storedSettings.repeatMode,
@@ -276,12 +333,10 @@ export function usePlayerApp() {
       const restoredQueue = storedSettings.queueTrackIds.filter((trackId) => nextLibrary.tracks.some((track) => track.id === trackId));
       setQueue(makeQueue(restoredQueue));
       setCurrentIndex(
-        storedSettings.currentTrackId ? restoredQueue.findIndex((trackId) => trackId === storedSettings.currentTrackId) : -1,
+        restoredCurrentTrack ? restoredQueue.findIndex((trackId) => trackId === restoredCurrentTrack) : -1,
       );
 
-      if (storedSettings.musicFolders.length) {
-        await refreshLibrary(storedSettings.musicFolders, false);
-      } else {
+      if (!storedSettings.musicFolders.length) {
         setSyncMessage("Add a music folder to build your library.");
       }
 
@@ -443,13 +498,18 @@ export function usePlayerApp() {
   async function togglePlay() {
     try {
       setError(null);
-      if (!queue.length && visibleTracks.length) {
-        await playTrack(visibleTracks[0], visibleTracks);
+      if (!currentTrack && queue.length) {
+        await playQueueIndex(Math.max(currentIndex, 0));
         return;
       }
 
-      if (!currentTrack && queue.length) {
-        await playQueueIndex(Math.max(currentIndex, 0));
+      if (!queue.length && currentTrack) {
+        await playTrack(currentTrack, [currentTrack]);
+        return;
+      }
+
+      if (!queue.length && visibleTracks.length) {
+        await playTrack(visibleTracks[0], visibleTracks);
         return;
       }
 
