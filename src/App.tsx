@@ -3,6 +3,7 @@ import { animated, useReducedMotion, useSpring } from "@react-spring/web";
 import { listen } from "@tauri-apps/api/event";
 import { EmptyState } from "./components/EmptyState";
 import { LibraryStage } from "./components/LibraryStage";
+import { MainPanelZeroState } from "./components/MainPanelZeroState";
 import { QueuePanel } from "./components/QueuePanel";
 import { Sidebar } from "./components/Sidebar";
 import { SyncStatusCard } from "./components/SyncStatusCard";
@@ -41,6 +42,7 @@ export default function App() {
     artists,
     visibleAlbums,
     selectedArtist,
+    focusedArtist,
     selectedAlbum,
     currentAlbum,
     selectedArtistId,
@@ -70,6 +72,10 @@ export default function App() {
   } = usePlayerApp();
 
   addFoldersRef.current = addFolders;
+  const stageArtist = focusedArtist;
+  const stageAlbum = stageArtist ? selectedAlbum : null;
+  const stageHeroAlbum = currentAlbum ?? stageAlbum ?? stageArtist?.albums[0] ?? null;
+  const hasActiveStage = Boolean((stageArtist || stageAlbum) && stageHeroAlbum);
 
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
@@ -181,6 +187,7 @@ export default function App() {
         onSelectArtist={setSelectedArtistId}
         onSelectAlbum={setSelectedAlbumId}
         onSelectTrack={(track, albumTracks) => void playTrack(track, albumTracks)}
+        onAddSource={() => void addFolders()}
         onSearchChange={setSearchQuery}
         onToggleCollapsed={() => setSidebarCollapsed((state) => !state)}
         onFocusSearch={() => {
@@ -212,11 +219,13 @@ export default function App() {
               </button>
             }
           />
+        ) : !hasActiveStage ? (
+          <MainPanelZeroState />
         ) : (
           <>
             <LibraryStage
-              artist={selectedArtist}
-              album={selectedAlbum}
+              artist={stageArtist}
+              album={stageAlbum}
               nowPlayingAlbum={currentAlbum}
               track={currentTrack}
               playback={playback}

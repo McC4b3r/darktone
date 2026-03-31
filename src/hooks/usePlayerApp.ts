@@ -106,6 +106,7 @@ export function usePlayerApp() {
   const [currentIndex, setCurrentIndex] = useState(-1);
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedArtistId, setSelectedArtistId] = useState<string | null>(null);
+  const [focusedArtistId, setFocusedArtistId] = useState<string | null>(null);
   const [selectedAlbumId, setSelectedAlbumId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [isSyncing, setIsSyncing] = useState(false);
@@ -140,6 +141,7 @@ export function usePlayerApp() {
   );
 
   const selectedArtist = artists.find((artist) => artist.id === selectedArtistId) ?? null;
+  const focusedArtist = artists.find((artist) => artist.id === focusedArtistId) ?? null;
   const visibleAlbums = selectedArtist ? selectedArtist.albums : allAlbums;
   const selectedAlbum =
     visibleAlbums.find((album) => album.id === selectedAlbumId) ??
@@ -498,31 +500,24 @@ export function usePlayerApp() {
   async function togglePlay() {
     try {
       setError(null);
-      if (!currentTrack && queue.length) {
-        await playQueueIndex(Math.max(currentIndex, 0));
-        return;
-      }
-
-      if (!queue.length && currentTrack) {
-        await playTrack(currentTrack, [currentTrack]);
-        return;
-      }
-
-      if (!queue.length && visibleTracks.length) {
-        await playTrack(visibleTracks[0], visibleTracks);
-        return;
-      }
-
-      if (!currentTrack) {
-        return;
-      }
-
       if (playback.isPlaying) {
         audioEngine.pause();
         return;
       }
 
-      await audioEngine.resume(currentTrack, playback.currentTime);
+      if (currentTrack) {
+        await audioEngine.resume(currentTrack, playback.currentTime);
+        return;
+      }
+
+      if (queue.length) {
+        await playQueueIndex(Math.max(currentIndex, 0));
+        return;
+      }
+
+      if (visibleTracks.length) {
+        await playTrack(visibleTracks[0], visibleTracks);
+      }
     } catch (cause) {
       console.error(cause);
       setError(getErrorMessage(cause, "Playback failed"));
@@ -621,6 +616,9 @@ export function usePlayerApp() {
   function chooseArtist(artistId: string | null) {
     setSelectedArtistId(artistId);
     setSelectedAlbumId(null);
+    if (artistId) {
+      setFocusedArtistId(artistId);
+    }
   }
 
   function chooseAlbum(albumId: string | null) {
@@ -645,6 +643,7 @@ export function usePlayerApp() {
     visibleAlbums,
     visibleTracks,
     selectedArtist,
+    focusedArtist,
     selectedAlbum,
     currentAlbum,
     selectedArtistId,

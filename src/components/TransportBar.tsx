@@ -18,6 +18,7 @@ export function TransportBar({
   const timelineMax = Math.max(playback.duration, 1);
   const timelineValue = Math.min(playback.currentTime, playback.duration || 0);
   const timelinePercent = Math.min(100, (timelineValue / timelineMax) * 100);
+  const volumePercent = Math.min(100, Math.max(0, playback.volume * 100));
   const remaining = Math.max(playback.duration - playback.currentTime, 0);
 
   return (
@@ -54,6 +55,11 @@ export function TransportBar({
           max={1}
           step={0.01}
           value={playback.volume}
+          style={
+            {
+              "--range-progress": `${volumePercent}%`,
+            } as CSSProperties
+          }
           onChange={(event) => onVolumeChange(Number(event.target.value))}
         />
       </div>

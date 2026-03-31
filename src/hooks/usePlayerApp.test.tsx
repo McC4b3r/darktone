@@ -2,6 +2,7 @@ import { act, useEffect } from "react";
 import ReactDOM from "react-dom/client";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppSettings, LibraryData } from "../lib/types";
+import type { AudioCallbacks } from "../lib/audio";
 
 const mockListen = vi.fn();
 const mockLoadSettings = vi.fn<[], Promise<AppSettings>>();
@@ -21,6 +22,8 @@ const mockAudioEngine = {
   pause: vi.fn(),
   seek: vi.fn(),
 };
+
+let audioCallbacks: AudioCallbacks = {};
 
 vi.mock("@tauri-apps/api/event", () => ({
   listen: (...args: unknown[]) => mockListen(...args),
@@ -88,6 +91,9 @@ describe("usePlayerApp", () => {
     mockWatchMusicFolders.mockResolvedValue(() => undefined);
     mockAudioEngine.load.mockResolvedValue(undefined);
     mockAudioEngine.resume.mockResolvedValue(undefined);
+    mockAudioEngine.setCallbacks.mockImplementation((callbacks: AudioCallbacks) => {
+      audioCallbacks = callbacks;
+    });
   });
 
   it("restores the current track on startup without loading audio or surfacing an error", async () => {
@@ -121,8 +127,61 @@ describe("usePlayerApp", () => {
       await flushEffects();
     });
 
-    expect(mockAudioEngine.load).toHaveBeenCalledTimes(1);
-    expect(mockAudioEngine.load).toHaveBeenCalledWith(track);
+    expect(mockAudioEngine.load).not.toHaveBeenCalled();
+    expect(mockAudioEngine.resume).toHaveBeenCalledTimes(1);
+    expect(mockAudioEngine.resume).toHaveBeenCalledWith(track, 0);
+
+    await act(async () => {
+      root.unmount();
+      await flushEffects();
+    });
+  });
+
+  it("resumes the paused current track instead of reloading it", async () => {
+    const { usePlayerApp } = await import("./usePlayerApp");
+    let latestState: ReturnType<typeof usePlayerApp> | null = null;
+    const container = document.createElement("div");
+    const root = ReactDOM.createRoot(container);
+
+    function Probe() {
+      const state = usePlayerApp();
+      useEffect(() => {
+        latestState = state;
+      }, [state]);
+      return <div>{state.error ?? ""}</div>;
+    }
+
+    await act(async () => {
+      root.render(<Probe />);
+      await flushEffects();
+    });
+
+    await act(async () => {
+      await latestState?.togglePlay();
+      audioCallbacks.onPlayStateChange?.(true);
+      await flushEffects();
+    });
+
+    expect(mockAudioEngine.resume).toHaveBeenCalledWith(track, 0);
+
+    await act(async () => {
+      mockAudioEngine.pause.mockClear();
+      mockAudioEngine.resume.mockClear();
+      latestState?.togglePlay();
+      audioCallbacks.onPlayStateChange?.(false);
+      await flushEffects();
+    });
+
+    expect(mockAudioEngine.pause).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      latestState?.togglePlay();
+      audioCallbacks.onPlayStateChange?.(true);
+      await flushEffects();
+    });
+
+    expect(mockAudioEngine.resume).toHaveBeenCalledTimes(1);
+    expect(mockAudioEngine.resume).toHaveBeenCalledWith(track, 0);
 
     await act(async () => {
       root.unmount();

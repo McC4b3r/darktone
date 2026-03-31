@@ -14,6 +14,7 @@ interface SidebarProps {
   onSelectArtist: (artistId: string | null) => void;
   onSelectAlbum: (albumId: string | null) => void;
   onSelectTrack: (track: Track, albumTracks: Track[]) => void;
+  onAddSource: () => void;
   onSearchChange: (value: string) => void;
   onToggleCollapsed: () => void;
   onFocusSearch: () => void;
@@ -31,6 +32,7 @@ export function Sidebar({
   onSelectArtist,
   onSelectAlbum,
   onSelectTrack,
+  onAddSource,
   onSearchChange,
   onToggleCollapsed,
   onFocusSearch,
@@ -103,19 +105,17 @@ export function Sidebar({
               <span>{musicFoldersCount} source{musicFoldersCount === 1 ? "" : "s"}</span>
               <span>{artists.length} artist{artists.length === 1 ? "" : "s"}</span>
             </div>
+            {musicFoldersCount === 0 ? (
+              <div className="sidebar__source-cta">
+                <button className="button sidebar__source-button" onClick={onAddSource}>
+                  Add Source
+                </button>
+                <p className="sidebar__source-hint">Choose a folder to watch and start building your library.</p>
+              </div>
+            ) : null}
           </div>
 
           <div className="sidebar__section sidebar__section--grow">
-            <button
-              className={`nav-item ${selectedArtistId === null ? "nav-item--active" : ""}`}
-              onClick={() => {
-                onSelectArtist(null);
-                onSelectAlbum(null);
-              }}
-            >
-              All Artists
-            </button>
-
             <div className="artist-list">
               {artists.map((artist) => (
                 <div key={artist.id} className="artist-list__group">

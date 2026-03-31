@@ -2,7 +2,7 @@ import { convertFileSrc } from "@tauri-apps/api/core";
 import { decodeAudioForPlayback, readAudioFile } from "./tauri";
 import type { Track } from "./types";
 
-type AudioCallbacks = {
+export type AudioCallbacks = {
   onTimeUpdate?: (currentTime: number, duration: number) => void;
   onEnded?: () => void;
   onPlayStateChange?: (isPlaying: boolean) => void;
