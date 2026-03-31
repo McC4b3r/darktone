@@ -2,10 +2,17 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Track } from "./types";
 
 const mockPrepareDecodedAudioForPlayback = vi.fn<[string], Promise<string>>();
-const mockConvertFileSrc = vi.fn((path: string, protocol = "asset") => `${protocol}://${path}`);
+const mockReadPreparedPlaybackAudioBytes = vi.fn<[string], Promise<number[]>>();
+const mockConvertFileSrc = vi.fn(
+  (path: string, protocol = "asset") => `http://${protocol}.localhost/${encodeURIComponent(path)}`,
+);
+let blobUrlCounter = 0;
+const createObjectURL = vi.fn((blob: Blob) => `blob:${blob.type}:${blobUrlCounter++}`);
+const revokeObjectURL = vi.fn();
 
 vi.mock("./tauri", () => ({
   prepareDecodedAudioForPlayback: (path: string) => mockPrepareDecodedAudioForPlayback(path),
+  readPreparedPlaybackAudioBytes: (path: string) => mockReadPreparedPlaybackAudioBytes(path),
 }));
 
 vi.mock("@tauri-apps/api/core", () => ({
@@ -150,11 +157,38 @@ const mp3Track: Track = {
   format: "mp3",
 };
 
+const wavTrack: Track = {
+  ...flacTrack,
+  id: "wav-track",
+  path: "C:/music/clean.wav",
+  filename: "clean.wav",
+  format: "wav",
+};
+
+const PACKAGED_WINDOWS = {
+  isDev: false,
+  isWindows: true,
+} as const;
+
+const DEV_WINDOWS = {
+  isDev: true,
+  isWindows: true,
+} as const;
+
+const PACKAGED_NON_WINDOWS = {
+  isDev: false,
+  isWindows: false,
+} as const;
+
 beforeEach(() => {
   vi.resetModules();
   mockPrepareDecodedAudioForPlayback.mockReset();
+  mockReadPreparedPlaybackAudioBytes.mockReset();
   mockConvertFileSrc.mockClear();
+  createObjectURL.mockClear();
+  revokeObjectURL.mockClear();
   FakeAudio.failures.clear();
+  blobUrlCounter = 0;
 
   vi.stubGlobal("Audio", FakeAudio);
   vi.stubGlobal("AudioContext", FakeAudioContext);
@@ -164,123 +198,129 @@ beforeEach(() => {
     MEDIA_ERR_DECODE: 3,
     MEDIA_ERR_SRC_NOT_SUPPORTED: 4,
   });
+  Object.defineProperty(URL, "createObjectURL", {
+    configurable: true,
+    writable: true,
+    value: createObjectURL,
+  });
+  Object.defineProperty(URL, "revokeObjectURL", {
+    configurable: true,
+    writable: true,
+    value: revokeObjectURL,
+  });
 });
 
 describe("AudioEngine", () => {
-  it("chooses the native-file fallback first for packaged Windows builds", async () => {
-    const { getTrackLoadStrategyOrder } = await import("./audio");
+  it.each([mp3Track, wavTrack, flacTrack])(
+    "chooses decoded WAV first for packaged Windows %s tracks",
+    async (track) => {
+      const { getTrackLoadStrategyOrder } = await import("./audio");
 
-    expect(
-      getTrackLoadStrategyOrder(mp3Track, {
-        isDev: false,
-        isWindows: true,
-      }),
-    ).toEqual(["native-file", "direct-file", "decoded-wav"]);
-  });
+      expect(getTrackLoadStrategyOrder(track, PACKAGED_WINDOWS)).toEqual([
+        "decoded-wav",
+        "native-file",
+        "direct-file",
+      ]);
+    },
+  );
 
   it("keeps the direct-first strategy outside packaged Windows builds", async () => {
     const { getTrackLoadStrategyOrder } = await import("./audio");
 
-    expect(
-      getTrackLoadStrategyOrder(mp3Track, {
-        isDev: true,
-        isWindows: true,
-      }),
-    ).toEqual(["direct-file", "native-file", "decoded-wav"]);
+    expect(getTrackLoadStrategyOrder(mp3Track, DEV_WINDOWS)).toEqual([
+      "direct-file",
+      "native-file",
+      "decoded-wav",
+    ]);
 
-    expect(
-      getTrackLoadStrategyOrder(flacTrack, {
-        isDev: false,
-        isWindows: false,
-      }),
-    ).toEqual(["direct-file", "native-file", "decoded-wav"]);
+    expect(getTrackLoadStrategyOrder(flacTrack, PACKAGED_NON_WINDOWS)).toEqual([
+      "direct-file",
+      "native-file",
+      "decoded-wav",
+    ]);
   });
 
-  it("tries direct and native file sources before using the decoded WAV fallback for FLAC", async () => {
-    mockPrepareDecodedAudioForPlayback.mockResolvedValue("C:/app/playback/problematic.wav");
+  it("uses Blob-backed decoded audio as the primary packaged Windows source", async () => {
+    mockPrepareDecodedAudioForPlayback.mockResolvedValue("C:/app/playback/working.wav");
+    mockReadPreparedPlaybackAudioBytes.mockResolvedValue([10, 20, 30, 40]);
 
     const { AudioEngine } = await import("./audio");
-    const engine = new AudioEngine();
+    const engine = new AudioEngine(PACKAGED_WINDOWS);
 
-    await engine.load(flacTrack, false);
+    await engine.load(mp3Track, false);
 
-    expect(mockConvertFileSrc).toHaveBeenNthCalledWith(1, flacTrack.path, undefined);
-    expect(mockConvertFileSrc).toHaveBeenNthCalledWith(2, flacTrack.path, "playback");
-    expect(mockPrepareDecodedAudioForPlayback).toHaveBeenCalledWith(flacTrack.path);
-    expect(mockConvertFileSrc).toHaveBeenNthCalledWith(3, "C:/app/playback/problematic.wav", undefined);
+    expect(mockPrepareDecodedAudioForPlayback).toHaveBeenCalledWith(mp3Track.path);
+    expect(mockReadPreparedPlaybackAudioBytes).toHaveBeenCalledWith("C:/app/playback/working.wav");
+    expect(mockConvertFileSrc).not.toHaveBeenCalled();
+    expect(createObjectURL).toHaveBeenCalledTimes(1);
+    expect((createObjectURL.mock.calls[0]?.[0] as Blob).type).toBe("audio/wav");
   });
 
-  it("does not use fallbacks for mp3 when the direct source succeeds", async () => {
+  it("does not use fallbacks for mp3 when the direct source succeeds outside packaged Windows", async () => {
     const { AudioEngine } = await import("./audio");
-    const engine = new AudioEngine();
+    const engine = new AudioEngine(DEV_WINDOWS);
 
     await engine.load(mp3Track, false);
 
     expect(mockConvertFileSrc).toHaveBeenCalledWith(mp3Track.path, undefined);
     expect(mockPrepareDecodedAudioForPlayback).not.toHaveBeenCalled();
+    expect(mockReadPreparedPlaybackAudioBytes).not.toHaveBeenCalled();
   });
 
-  it("uses the native-file fallback for mp3 when the direct source fails", async () => {
-    FakeAudio.failures.set(`asset://${mp3Track.path}`, {
-      code: 2,
-      message: "network error while loading media",
-    });
-
-    const { AudioEngine } = await import("./audio");
-    const engine = new AudioEngine();
-
-    await engine.load(mp3Track, false);
-
-    expect(mockConvertFileSrc).toHaveBeenNthCalledWith(1, mp3Track.path, undefined);
-    expect(mockConvertFileSrc).toHaveBeenNthCalledWith(2, mp3Track.path, "playback");
-    expect(mockPrepareDecodedAudioForPlayback).not.toHaveBeenCalled();
-  });
-
-  it("uses decoded fallback after direct and native failures when both are unsupported-source errors", async () => {
+  it("falls back to the native-file source when packaged Windows decoded playback fails", async () => {
     mockPrepareDecodedAudioForPlayback.mockResolvedValue("C:/app/playback/working.wav");
-    FakeAudio.failures.set(`asset://${mp3Track.path}`, {
-      code: 4,
-      message: "PipelineStatus::DEMUXER_ERROR_COULD_NOT_OPEN: FFmpegDemuxer: open context failed",
-    });
-    FakeAudio.failures.set(`playback://${mp3Track.path}`, {
-      code: 4,
-      message: "PipelineStatus::DEMUXER_ERROR_COULD_NOT_OPEN: FFmpegDemuxer: open context failed",
-    });
+    mockReadPreparedPlaybackAudioBytes.mockRejectedValue(new Error("read failed"));
 
     const { AudioEngine } = await import("./audio");
-    const engine = new AudioEngine();
+    const engine = new AudioEngine(PACKAGED_WINDOWS);
 
     await engine.load(mp3Track, false);
 
     expect(mockPrepareDecodedAudioForPlayback).toHaveBeenCalledWith(mp3Track.path);
-    expect(mockConvertFileSrc).toHaveBeenNthCalledWith(3, "C:/app/playback/working.wav", undefined);
+    expect(mockReadPreparedPlaybackAudioBytes).toHaveBeenCalledWith("C:/app/playback/working.wav");
+    expect(mockConvertFileSrc).toHaveBeenCalledTimes(1);
+    expect(mockConvertFileSrc).toHaveBeenNthCalledWith(1, mp3Track.path, "playback");
   });
 
-  it("uses decoded fallback as a final recovery path when direct and native playback both fail", async () => {
+  it("falls back to the direct-file source when packaged Windows decoded and native playback both fail", async () => {
     mockPrepareDecodedAudioForPlayback.mockResolvedValue("C:/app/playback/working.wav");
-    FakeAudio.failures.set(`asset://${mp3Track.path}`, {
-      code: 2,
-      message: "network error while loading media",
-    });
-    FakeAudio.failures.set(`playback://${mp3Track.path}`, {
+    mockReadPreparedPlaybackAudioBytes.mockRejectedValue(new Error("read failed"));
+    FakeAudio.failures.set(`http://playback.localhost/${encodeURIComponent(mp3Track.path)}`, {
       code: 3,
       message: "media decode error",
     });
 
     const { AudioEngine } = await import("./audio");
-    const engine = new AudioEngine();
+    const engine = new AudioEngine(PACKAGED_WINDOWS);
 
     await engine.load(mp3Track, false);
 
-    expect(mockPrepareDecodedAudioForPlayback).toHaveBeenCalledWith(mp3Track.path);
-    expect(mockConvertFileSrc).toHaveBeenNthCalledWith(3, "C:/app/playback/working.wav", undefined);
+    expect(mockConvertFileSrc).toHaveBeenNthCalledWith(1, mp3Track.path, "playback");
+    expect(mockConvertFileSrc).toHaveBeenNthCalledWith(2, mp3Track.path, undefined);
   });
 
-  it("reset clears the active source and startup state after a fallback load", async () => {
-    mockPrepareDecodedAudioForPlayback.mockResolvedValue("C:/app/playback/problematic.wav");
+  it("revokes the previous Blob URL when packaged Windows decoded playback switches tracks", async () => {
+    mockPrepareDecodedAudioForPlayback.mockResolvedValue("C:/app/playback/working.wav");
+    mockReadPreparedPlaybackAudioBytes.mockResolvedValue([10, 20, 30, 40]);
 
     const { AudioEngine } = await import("./audio");
-    const engine = new AudioEngine();
+    const engine = new AudioEngine(PACKAGED_WINDOWS);
+
+    await engine.load(mp3Track, false);
+    mockPrepareDecodedAudioForPlayback.mockResolvedValue("C:/app/playback/clean.wav");
+    await engine.load(wavTrack, false);
+
+    expect(createObjectURL).toHaveBeenCalledTimes(2);
+    expect(revokeObjectURL).toHaveBeenCalledTimes(1);
+    expect(revokeObjectURL).toHaveBeenCalledWith("blob:audio/wav:0");
+  });
+
+  it("reset clears the active source and revokes the packaged Windows Blob URL", async () => {
+    mockPrepareDecodedAudioForPlayback.mockResolvedValue("C:/app/playback/problematic.wav");
+    mockReadPreparedPlaybackAudioBytes.mockResolvedValue([10, 20, 30, 40]);
+
+    const { AudioEngine } = await import("./audio");
+    const engine = new AudioEngine(PACKAGED_WINDOWS);
 
     await engine.load(flacTrack, false);
     const mediaElement = engine.getMediaElement() as unknown as FakeAudio;
@@ -288,6 +328,8 @@ describe("AudioEngine", () => {
 
     engine.reset();
 
+    expect(revokeObjectURL).toHaveBeenCalledTimes(1);
+    expect(revokeObjectURL).toHaveBeenCalledWith("blob:audio/wav:0");
     expect(mediaElement.src).toBe("");
     expect(mediaElement.currentSrc).toBe("");
     expect(mediaElement.currentTime).toBe(0);
@@ -295,22 +337,22 @@ describe("AudioEngine", () => {
     expect((engine as unknown as { loadingSource: boolean }).loadingSource).toBe(false);
   });
 
-  it("reports the attempted source strategies when playback fails everywhere", async () => {
+  it("reports the attempted packaged Windows playback strategies when every source fails", async () => {
     mockPrepareDecodedAudioForPlayback.mockRejectedValue(new Error("decoder failed"));
-    FakeAudio.failures.set(`asset://${mp3Track.path}`, {
+    FakeAudio.failures.set(`http://playback.localhost/${encodeURIComponent(mp3Track.path)}`, {
       code: 2,
       message: "network error while loading media",
     });
-    FakeAudio.failures.set(`playback://${mp3Track.path}`, {
+    FakeAudio.failures.set(`http://asset.localhost/${encodeURIComponent(mp3Track.path)}`, {
       code: 3,
       message: "media decode error",
     });
 
     const { AudioEngine } = await import("./audio");
-    const engine = new AudioEngine();
+    const engine = new AudioEngine(PACKAGED_WINDOWS);
 
     await expect(engine.load(mp3Track, false)).rejects.toThrow(
-      'Playback could not start for "Problematic" after trying direct-file, native-file, decoded-wav.',
+      'Playback could not start for "Problematic" after trying decoded-wav, native-file, direct-file.',
     );
   });
 });

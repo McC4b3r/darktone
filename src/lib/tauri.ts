@@ -44,6 +44,10 @@ export async function prepareDecodedAudioForPlayback(path: string) {
   return invoke<string>("prepare_decoded_audio_for_playback", { path });
 }
 
+export async function readPreparedPlaybackAudioBytes(path: string) {
+  return invoke<number[]>("read_prepared_playback_audio_bytes", { path });
+}
+
 function shouldHandleWatchEvent(event: WatchEvent) {
   return !(typeof event.type === "object" && "access" in event.type);
 }

@@ -1,5 +1,5 @@
 import { convertFileSrc } from "@tauri-apps/api/core";
-import { prepareDecodedAudioForPlayback } from "./tauri";
+import { prepareDecodedAudioForPlayback, readPreparedPlaybackAudioBytes } from "./tauri";
 import type { Track } from "./types";
 
 export type AudioCallbacks = {
@@ -18,6 +18,10 @@ type PlaybackEnvironment = {
   isDev: boolean;
   isWindows: boolean;
 };
+
+function isPackagedWindowsPlayback(environment: PlaybackEnvironment) {
+  return !environment.isDev && environment.isWindows;
+}
 
 function isPlaybackDebugEnabled() {
   if (import.meta.env.DEV) {
@@ -53,8 +57,8 @@ export function getTrackLoadStrategyOrder(
   _track: Track,
   environment: PlaybackEnvironment = detectPlaybackEnvironment(),
 ): PlaybackSourceStrategy[] {
-  if (!environment.isDev && environment.isWindows) {
-    return ["native-file", "direct-file", "decoded-wav"];
+  if (isPackagedWindowsPlayback(environment)) {
+    return ["decoded-wav", "native-file", "direct-file"];
   }
 
   return ["direct-file", "native-file", "decoded-wav"];
@@ -63,13 +67,16 @@ export function getTrackLoadStrategyOrder(
 export class AudioEngine {
   private audio: HTMLAudioElement;
   private callbacks: AudioCallbacks = {};
+  private readonly environment: PlaybackEnvironment;
+  private objectUrl: string | null = null;
   private loadedTrackId: string | null = null;
   private loadingSource = false;
   private audioContext: AudioContext | null = null;
   private sourceNode: MediaElementAudioSourceNode | null = null;
   private outputNode: GainNode | null = null;
 
-  constructor() {
+  constructor(environment: PlaybackEnvironment = detectPlaybackEnvironment()) {
+    this.environment = environment;
     this.audio = new Audio();
     this.audio.preload = "metadata";
 
@@ -165,6 +172,18 @@ export class AudioEngine {
     return this.outputNode;
   }
 
+  private revokeObjectUrl(url = this.objectUrl) {
+    if (!url) {
+      return;
+    }
+
+    URL.revokeObjectURL(url);
+
+    if (this.objectUrl === url) {
+      this.objectUrl = null;
+    }
+  }
+
   private describeMediaError() {
     const error = this.audio.error;
     if (!error) {
@@ -215,14 +234,25 @@ export class AudioEngine {
     });
   }
 
-  private async assignSource(src: string) {
+  private async assignSource(src: string, objectUrl: string | null = null) {
+    const previousObjectUrl = this.objectUrl;
+
     logPlaybackDebug("assigning source", {
       src,
+      hadObjectUrl: Boolean(previousObjectUrl),
+      nextUsesObjectUrl: Boolean(objectUrl),
       loadedTrackId: this.loadedTrackId,
     });
+
     this.audio.pause();
     this.audio.src = src;
+    this.objectUrl = objectUrl;
     this.audio.load();
+
+    if (previousObjectUrl && previousObjectUrl !== objectUrl) {
+      this.revokeObjectUrl(previousObjectUrl);
+    }
+
     await this.waitForLoadResult();
   }
 
@@ -232,6 +262,15 @@ export class AudioEngine {
 
   private async assignDecodedSource(track: Track) {
     const decodedPath = await prepareDecodedAudioForPlayback(track.path);
+
+    if (isPackagedWindowsPlayback(this.environment)) {
+      const bytes = await readPreparedPlaybackAudioBytes(decodedPath);
+      const blob = new Blob([new Uint8Array(bytes)], { type: "audio/wav" });
+      const objectUrl = URL.createObjectURL(blob);
+      await this.assignSource(objectUrl, objectUrl);
+      return;
+    }
+
     await this.assignSource(convertFileSrc(decodedPath));
   }
 
@@ -245,8 +284,7 @@ export class AudioEngine {
       return false;
     }
 
-    const environment = detectPlaybackEnvironment();
-    if (!environment.isDev && environment.isWindows) {
+    if (isPackagedWindowsPlayback(this.environment)) {
       return false;
     }
 
@@ -372,7 +410,7 @@ export class AudioEngine {
       const attemptedStrategies: PlaybackSourceStrategy[] = [];
       const strategyErrors: Error[] = [];
 
-      for (const strategy of getTrackLoadStrategyOrder(track)) {
+      for (const strategy of getTrackLoadStrategyOrder(track, this.environment)) {
         if (this.shouldSkipStrategy(track, strategy, strategyErrors)) {
           logPlaybackDebug("loading strategy skipped", {
             strategy,
@@ -476,16 +514,25 @@ export class AudioEngine {
   }
 
   reset() {
+    const previousObjectUrl = this.objectUrl;
+
     logPlaybackDebug("resetting audio engine", {
       loadedTrackId: this.loadedTrackId,
       currentSrc: this.audio.currentSrc || this.audio.src || null,
+      hadObjectUrl: Boolean(previousObjectUrl),
     });
+
     this.loadedTrackId = null;
     this.loadingSource = false;
     this.audio.pause();
     this.audio.currentTime = 0;
     this.audio.removeAttribute("src");
+    this.objectUrl = null;
     this.audio.load();
+
+    if (previousObjectUrl) {
+      this.revokeObjectUrl(previousObjectUrl);
+    }
   }
 }
 

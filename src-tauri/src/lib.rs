@@ -808,6 +808,22 @@ fn ensure_decoded_playback_file(app: &AppHandle, source_path: &Path) -> Result<P
     }
 }
 
+fn resolve_prepared_playback_cache_path(
+    app: &AppHandle,
+    requested_path: &Path,
+) -> Result<PathBuf, String> {
+    let cache_dir = playback_cache_dir(app)?;
+    let canonical_cache_dir = fs::canonicalize(&cache_dir).map_err(|error| error.to_string())?;
+    let canonical_requested_path =
+        fs::canonicalize(requested_path).map_err(|error| error.to_string())?;
+
+    if !canonical_requested_path.starts_with(&canonical_cache_dir) {
+        return Err("Prepared playback audio must be read from the app playback cache.".into());
+    }
+
+    Ok(canonical_requested_path)
+}
+
 fn playback_protocol_response(request: Request<Vec<u8>>) -> Response<Vec<u8>> {
     match decode_playback_request_path(&request) {
         Ok(path) => serve_file_for_playback(request, &path, playback_mime_type(&path)),
@@ -1287,6 +1303,12 @@ fn prepare_decoded_audio_for_playback(app: AppHandle, path: String) -> Result<St
     Ok(decoded_path.to_string_lossy().into_owned())
 }
 
+#[tauri::command]
+fn read_prepared_playback_audio_bytes(app: AppHandle, path: String) -> Result<Vec<u8>, String> {
+    let resolved_path = resolve_prepared_playback_cache_path(&app, Path::new(&path))?;
+    fs::read(resolved_path).map_err(|error| error.to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -1319,7 +1341,8 @@ pub fn run() {
             load_library,
             save_settings,
             load_settings,
-            prepare_decoded_audio_for_playback
+            prepare_decoded_audio_for_playback,
+            read_prepared_playback_audio_bytes
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -1327,13 +1350,16 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::{encode_wav_from_pcm_i16, find_album_art, AlbumArtCache};
+    use super::{
+        decode_playback_request_path, encode_wav_from_pcm_i16, find_album_art, AlbumArtCache,
+    };
     use std::{
         fs,
         path::{Path, PathBuf},
         thread,
         time::{Duration, SystemTime, UNIX_EPOCH},
     };
+    use tauri::http::Request;
 
     struct TestDir {
         path: PathBuf,
@@ -1448,5 +1474,17 @@ mod tests {
             find_album_art(&track_path, &mut album_art_cache),
             Some(preferred_art_path.to_string_lossy().to_string())
         );
+    }
+
+    #[test]
+    fn decode_playback_request_path_handles_windows_custom_protocol_urls() {
+        let request = Request::builder()
+            .uri("http://playback.localhost/C%3A%5CMusic%5CArtist%5CTrack.mp3")
+            .body(Vec::new())
+            .expect("request should build");
+
+        let decoded = decode_playback_request_path(&request).expect("playback path should decode");
+
+        assert_eq!(decoded, PathBuf::from(r"C:\Music\Artist\Track.mp3"));
     }
 }
