@@ -175,10 +175,9 @@ describe("usePlayerApp", () => {
     if (!latestState) {
       throw new Error("Expected hook state to be available.");
     }
-    const state = latestState as UsePlayerAppState;
 
     await act(async () => {
-      await state.togglePlay();
+      await (latestState as UsePlayerAppState).togglePlay();
       audioCallbacks.onPlayStateChange?.(true);
       await flushEffects();
     });
@@ -188,7 +187,7 @@ describe("usePlayerApp", () => {
     await act(async () => {
       mockAudioEngine.pause.mockClear();
       mockAudioEngine.resume.mockClear();
-      state.togglePlay();
+      await (latestState as UsePlayerAppState).togglePlay();
       audioCallbacks.onPlayStateChange?.(false);
       await flushEffects();
     });
@@ -196,7 +195,7 @@ describe("usePlayerApp", () => {
     expect(mockAudioEngine.pause).toHaveBeenCalledTimes(1);
 
     await act(async () => {
-      state.togglePlay();
+      await (latestState as UsePlayerAppState).togglePlay();
       audioCallbacks.onPlayStateChange?.(true);
       await flushEffects();
     });
@@ -238,6 +237,46 @@ describe("usePlayerApp", () => {
 
     expect(state.error).toBeNull();
     expect(mockAudioEngine.load).not.toHaveBeenCalled();
+
+    await act(async () => {
+      root.unmount();
+      await flushEffects();
+    });
+  });
+
+  it("surfaces attempted playback strategies when resume fails", async () => {
+    mockAudioEngine.resume.mockRejectedValueOnce(
+      new Error('Playback could not start for "Eyes Red" after trying decoded-wav, direct-file, blob. decoder failed'),
+    );
+
+    const { usePlayerApp } = await import("./usePlayerApp");
+    let latestState: UsePlayerAppState | null = null;
+    const container = document.createElement("div");
+    const root = ReactDOM.createRoot(container);
+
+    function Probe() {
+      const state = usePlayerApp();
+      useEffect(() => {
+        latestState = state;
+      }, [state]);
+      return <div>{state.error ?? ""}</div>;
+    }
+
+    await act(async () => {
+      root.render(<Probe />);
+      await flushEffects();
+    });
+
+    if (!latestState) {
+      throw new Error("Expected hook state to be available.");
+    }
+
+    await act(async () => {
+      await (latestState as UsePlayerAppState).togglePlay();
+      await flushEffects();
+    });
+
+    expect((latestState as UsePlayerAppState).error).toContain('after trying decoded-wav, direct-file, blob');
 
     await act(async () => {
       root.unmount();

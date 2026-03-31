@@ -11,6 +11,13 @@ export type AudioCallbacks = {
 
 const PLAYBACK_DEBUG_STORAGE_KEY = "darktone:debug-playback";
 
+export type PlaybackSourceStrategy = "decoded-wav" | "direct-file" | "blob";
+
+type PlaybackEnvironment = {
+  isDev: boolean;
+  isWindows: boolean;
+};
+
 function isPlaybackDebugEnabled() {
   if (import.meta.env.DEV) {
     return true;
@@ -30,6 +37,30 @@ function logPlaybackDebug(message: string, details?: Record<string, unknown>) {
 
   const payload = details ? { ...details } : undefined;
   console.info(`[playback] ${message}`, payload ?? "");
+}
+
+function detectPlaybackEnvironment(): PlaybackEnvironment {
+  const userAgent = typeof navigator === "undefined" ? "" : navigator.userAgent;
+
+  return {
+    isDev: Boolean(import.meta.env.DEV),
+    isWindows: /windows/i.test(userAgent),
+  };
+}
+
+export function getTrackLoadStrategyOrder(
+  track: Track,
+  environment: PlaybackEnvironment = detectPlaybackEnvironment(),
+): PlaybackSourceStrategy[] {
+  if (!environment.isDev && environment.isWindows) {
+    return ["decoded-wav", "direct-file", "blob"];
+  }
+
+  if (track.format === "flac") {
+    return ["direct-file", "decoded-wav", "blob"];
+  }
+
+  return ["direct-file", "blob", "decoded-wav"];
 }
 
 export class AudioEngine {
@@ -237,6 +268,96 @@ export class AudioEngine {
     return message.includes("no supported source was found") || message.includes("demuxer_error_could_not_open");
   }
 
+  private shouldSkipStrategy(track: Track, strategy: PlaybackSourceStrategy, previousErrors: Error[]) {
+    if (strategy !== "decoded-wav") {
+      return false;
+    }
+
+    const environment = detectPlaybackEnvironment();
+    if (!environment.isDev && environment.isWindows) {
+      return false;
+    }
+
+    if (track.format === "flac") {
+      return !previousErrors.some((error) => this.shouldUseDecodedFallback(error));
+    }
+
+    if (track.format === "wav") {
+      return !previousErrors.some((error) => this.shouldUseDecodedFallback(error));
+    }
+
+    return false;
+  }
+
+  private async runLoadStrategy(track: Track, strategy: PlaybackSourceStrategy) {
+    logPlaybackDebug("loading strategy started", {
+      strategy,
+      trackId: track.id,
+      format: track.format,
+      path: track.path,
+    });
+
+    if (strategy === "decoded-wav") {
+      await this.loadDecodedFallback(track);
+      return;
+    }
+
+    if (strategy === "blob") {
+      await this.loadBlobFallback(track);
+      return;
+    }
+
+    await this.loadDirectSource(track);
+  }
+
+  private buildStrategyFailure(track: Track, attemptedStrategies: PlaybackSourceStrategy[], errors: Error[]) {
+    const attemptSummary = attemptedStrategies.join(", ");
+    const errorSummary = errors.map((error) => error.message).join("; ");
+
+    return new Error(
+      `Playback could not start for "${track.title}" after trying ${attemptSummary}. ${errorSummary}`,
+    );
+  }
+
+  private async resumeAudioContextIfNeeded() {
+    const audioContext = this.getAudioContext();
+    const previousState = audioContext.state;
+
+    logPlaybackDebug("checking audio context", {
+      beforeState: previousState,
+      trackId: this.loadedTrackId,
+    });
+
+    if (previousState === "suspended") {
+      await audioContext.resume();
+    }
+
+    logPlaybackDebug("audio context ready", {
+      beforeState: previousState,
+      afterState: audioContext.state,
+      trackId: this.loadedTrackId,
+    });
+  }
+
+  private async playMediaElement() {
+    logPlaybackDebug("calling audio.play()", {
+      trackId: this.loadedTrackId,
+      muted: this.audio.muted,
+      volume: this.audio.volume,
+      currentSrc: this.audio.currentSrc || this.audio.src || null,
+    });
+
+    await this.audio.play();
+
+    logPlaybackDebug("audio.play() resolved", {
+      trackId: this.loadedTrackId,
+      muted: this.audio.muted,
+      volume: this.audio.volume,
+      currentSrc: this.audio.currentSrc || this.audio.src || null,
+      paused: this.audio.paused,
+    });
+  }
+
   private async loadDirectSource(track: Track) {
     const startedAt = performance.now();
     await this.assignSource(convertFileSrc(track.path));
@@ -277,64 +398,48 @@ export class AudioEngine {
     this.loadingSource = true;
 
     try {
-      try {
-        await this.loadDirectSource(track);
-      } catch (directError) {
-        const directSourceError = directError instanceof Error ? directError : new Error("Direct file playback failed.");
-        logPlaybackDebug("direct source failed", {
-          trackId: track.id,
-          format: track.format,
-          path: track.path,
-          error: directSourceError.message,
-        });
+      const attemptedStrategies: PlaybackSourceStrategy[] = [];
+      const strategyErrors: Error[] = [];
 
-        const shouldTryDecodedFirst = track.format === "flac" && this.shouldUseDecodedFallback(directSourceError);
-
-        if (shouldTryDecodedFirst) {
-          try {
-            await this.loadDecodedFallback(track);
-          } catch (decodedError) {
-            const decodedSourceError = decodedError instanceof Error ? decodedError : new Error("Decoded playback failed.");
-            logPlaybackDebug("decoded fallback failed", {
-              trackId: track.id,
-              format: track.format,
-              path: track.path,
-              error: decodedSourceError.message,
-            });
-
-            try {
-              await this.loadBlobFallback(track);
-            } catch (blobError) {
-              const blobSourceError = blobError instanceof Error ? blobError : new Error("Blob playback failed.");
-              throw new Error(
-                `${directSourceError.message}; decoded fallback failed: ${decodedSourceError.message}; blob fallback failed: ${blobSourceError.message}`,
-              );
-            }
-          }
-        } else {
-          try {
-            await this.loadBlobFallback(track);
-          } catch (blobError) {
-            const blobSourceError = blobError instanceof Error ? blobError : new Error("Blob playback failed.");
-            const shouldTryDecodedAfterBlob =
-              track.format !== "wav" ||
-              this.shouldUseDecodedFallback(directSourceError) ||
-              this.shouldUseDecodedFallback(blobSourceError);
-
-            if (shouldTryDecodedAfterBlob) {
-              try {
-                await this.loadDecodedFallback(track);
-              } catch (decodedError) {
-                const decodedSourceError = decodedError instanceof Error ? decodedError : new Error("Decoded playback failed.");
-                throw new Error(
-                  `${directSourceError.message}; blob fallback failed: ${blobSourceError.message}; decoded fallback failed: ${decodedSourceError.message}`,
-                );
-              }
-            } else {
-              throw new Error(`${directSourceError.message}; blob fallback failed: ${blobSourceError.message}`);
-            }
-          }
+      for (const strategy of getTrackLoadStrategyOrder(track)) {
+        if (this.shouldSkipStrategy(track, strategy, strategyErrors)) {
+          logPlaybackDebug("loading strategy skipped", {
+            strategy,
+            trackId: track.id,
+            format: track.format,
+            path: track.path,
+          });
+          continue;
         }
+
+        attemptedStrategies.push(strategy);
+
+        try {
+          await this.runLoadStrategy(track, strategy);
+          logPlaybackDebug("loading strategy selected", {
+            strategy,
+            trackId: track.id,
+            format: track.format,
+            path: track.path,
+            attempts: attemptedStrategies,
+          });
+          break;
+        } catch (error) {
+          const strategyError = error instanceof Error ? error : new Error(`${strategy} playback failed.`);
+          strategyErrors.push(strategyError);
+          logPlaybackDebug("loading strategy failed", {
+            strategy,
+            trackId: track.id,
+            format: track.format,
+            path: track.path,
+            error: strategyError.message,
+            attempts: attemptedStrategies,
+          });
+        }
+      }
+
+      if (strategyErrors.length === attemptedStrategies.length) {
+        throw this.buildStrategyFailure(track, attemptedStrategies, strategyErrors);
       }
 
       logPlaybackDebug("load completed", {
@@ -344,11 +449,9 @@ export class AudioEngine {
         elapsedMs: Math.round(performance.now() - startedAt),
       });
 
-      if (this.getAudioContext().state === "suspended") {
-        await this.audioContext?.resume();
-      }
+      await this.resumeAudioContextIfNeeded();
       if (autoPlay) {
-        await this.audio.play();
+        await this.playMediaElement();
       }
     } finally {
       this.loadingSource = false;
@@ -356,10 +459,8 @@ export class AudioEngine {
   }
 
   async play() {
-    if (this.getAudioContext().state === "suspended") {
-      await this.audioContext?.resume();
-    }
-    await this.audio.play();
+    await this.resumeAudioContextIfNeeded();
+    await this.playMediaElement();
   }
 
   async resume(track: Track, currentTime = 0) {

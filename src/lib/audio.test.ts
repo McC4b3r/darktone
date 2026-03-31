@@ -187,6 +187,35 @@ beforeEach(() => {
 });
 
 describe("AudioEngine", () => {
+  it("chooses decoded WAV first for packaged Windows builds", async () => {
+    const { getTrackLoadStrategyOrder } = await import("./audio");
+
+    expect(
+      getTrackLoadStrategyOrder(mp3Track, {
+        isDev: false,
+        isWindows: true,
+      }),
+    ).toEqual(["decoded-wav", "direct-file", "blob"]);
+  });
+
+  it("keeps the existing direct-first strategy outside packaged Windows builds", async () => {
+    const { getTrackLoadStrategyOrder } = await import("./audio");
+
+    expect(
+      getTrackLoadStrategyOrder(mp3Track, {
+        isDev: true,
+        isWindows: true,
+      }),
+    ).toEqual(["direct-file", "blob", "decoded-wav"]);
+
+    expect(
+      getTrackLoadStrategyOrder(flacTrack, {
+        isDev: false,
+        isWindows: false,
+      }),
+    ).toEqual(["direct-file", "decoded-wav", "blob"]);
+  });
+
   it("tries the direct file source first and then falls back to Rust-decoded WAV for FLAC", async () => {
     mockDecodeAudioForPlayback.mockResolvedValue([10, 20, 30, 40]);
 
@@ -313,5 +342,25 @@ describe("AudioEngine", () => {
     expect(mediaElement.currentTime).toBe(0);
     expect((engine as unknown as { loadedTrackId: string | null }).loadedTrackId).toBeNull();
     expect((engine as unknown as { loadingSource: boolean }).loadingSource).toBe(false);
+  });
+
+  it("reports the attempted source strategies when playback fails everywhere", async () => {
+    mockReadAudioFile.mockResolvedValue([1, 2, 3]);
+    mockDecodeAudioForPlayback.mockRejectedValue(new Error("decoder failed"));
+    FakeAudio.failures.set(`file://${mp3Track.path}`, {
+      code: 2,
+      message: "network error while loading media",
+    });
+    FakeAudio.failures.set("blob:audio/mpeg:0", {
+      code: 3,
+      message: "media decode error",
+    });
+
+    const { AudioEngine } = await import("./audio");
+    const engine = new AudioEngine();
+
+    await expect(engine.load(mp3Track, false)).rejects.toThrow(
+      'Playback could not start for "Problematic" after trying direct-file, blob, decoded-wav.',
+    );
   });
 });

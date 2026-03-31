@@ -82,7 +82,7 @@ export function Sidebar({
                 aria-label="Collapse library explorer"
                 title="Collapse library explorer"
               >
-                <span aria-hidden="true">←</span>
+                <span className="sidebar__collapse-chevron" aria-hidden="true" />
               </button>
             </div>
           </div>

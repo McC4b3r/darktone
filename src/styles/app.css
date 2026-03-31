@@ -357,6 +357,15 @@ button {
   flex: 0 0 auto;
 }
 
+.sidebar__collapse-chevron {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-left: 2px solid currentColor;
+  border-bottom: 2px solid currentColor;
+  transform: rotate(45deg);
+}
+
 .field {
   display: flex;
   flex-direction: column;

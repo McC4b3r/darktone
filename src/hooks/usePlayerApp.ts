@@ -68,6 +68,18 @@ function getErrorMessage(cause: unknown, fallback: string) {
   return fallback;
 }
 
+function getPlaybackErrorMessage(cause: unknown) {
+  if (cause instanceof Error && cause.message) {
+    return `Playback failed. ${cause.message}`;
+  }
+
+  if (typeof cause === "string" && cause.trim()) {
+    return `Playback failed. ${cause}`;
+  }
+
+  return "Playback failed. The app could not open this track with any available source.";
+}
+
 function getPathLabel(path: string | null) {
   if (!path) return null;
   const segments = path.split(/[\\/]/).filter(Boolean);
@@ -171,7 +183,7 @@ export function usePlayerApp() {
         void playNext();
       },
       onError: (message) => {
-        setError(`Playback failed: ${message}`);
+        setError(`Playback failed. ${message}`);
       },
     });
   }, [playNext]);
@@ -460,7 +472,7 @@ export function usePlayerApp() {
       });
     } catch (cause) {
       console.error(cause);
-      setError(getErrorMessage(cause, "Playback failed"));
+      setError(getPlaybackErrorMessage(cause));
     }
   }
 
@@ -493,7 +505,7 @@ export function usePlayerApp() {
       });
     } catch (cause) {
       console.error(cause);
-      setError(getErrorMessage(cause, "Playback failed"));
+      setError(getPlaybackErrorMessage(cause));
     }
   }
 
@@ -520,7 +532,7 @@ export function usePlayerApp() {
       }
     } catch (cause) {
       console.error(cause);
-      setError(getErrorMessage(cause, "Playback failed"));
+      setError(getPlaybackErrorMessage(cause));
     }
   }
 
