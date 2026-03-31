@@ -227,7 +227,7 @@ export default function App() {
               album={stageAlbum}
               nowPlayingAlbum={currentAlbum}
               track={currentTrack}
-              playback={playback}
+              isPlaying={playback.isPlaying}
               onTogglePlay={() => void togglePlay()}
               onPrevious={() => void playPrevious()}
               onNext={() => void playNext()}
@@ -250,7 +250,8 @@ export default function App() {
       />
 
       <TransportBar
-        playback={playback}
+        volume={playback.volume}
+        muted={playback.muted}
         onSeek={seek}
         onVolumeChange={setVolume}
         onToggleMute={toggleMute}

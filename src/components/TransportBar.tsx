@@ -1,31 +1,34 @@
 import type { CSSProperties } from "react";
 import { formatTime } from "../lib/library";
-import type { PlaybackState } from "../lib/types";
+import { usePlaybackProgress } from "../lib/playbackProgress";
 
 interface TransportBarProps {
-  playback: PlaybackState;
+  volume: number;
+  muted: boolean;
   onSeek: (seconds: number) => void;
   onVolumeChange: (volume: number) => void;
   onToggleMute: () => void;
 }
 
 export function TransportBar({
-  playback,
+  volume,
+  muted,
   onSeek,
   onVolumeChange,
   onToggleMute,
 }: TransportBarProps) {
-  const timelineMax = Math.max(playback.duration, 1);
-  const timelineValue = Math.min(playback.currentTime, playback.duration || 0);
+  const playbackProgress = usePlaybackProgress();
+  const timelineMax = Math.max(playbackProgress.duration, 1);
+  const timelineValue = Math.min(playbackProgress.currentTime, playbackProgress.duration || 0);
   const timelinePercent = Math.min(100, (timelineValue / timelineMax) * 100);
-  const volumePercent = Math.min(100, Math.max(0, playback.volume * 100));
-  const remaining = Math.max(playback.duration - playback.currentTime, 0);
+  const volumePercent = Math.min(100, Math.max(0, volume * 100));
+  const remaining = Math.max(playbackProgress.duration - playbackProgress.currentTime, 0);
 
   return (
     <footer className="transport panel">
       <div className="transport__controls">
         <div className="transport__timeline">
-          <span className="transport__time transport__time--elapsed">{formatTime(playback.currentTime)}</span>
+          <span className="transport__time transport__time--elapsed">{formatTime(playbackProgress.currentTime)}</span>
           <input
             className="range range--timeline"
             type="range"
@@ -46,7 +49,7 @@ export function TransportBar({
 
       <div className="transport__volume">
         <button className="icon-button" onClick={onToggleMute}>
-          {playback.muted ? "Muted" : "Volume"}
+          {muted ? "Muted" : "Volume"}
         </button>
         <input
           className="range range--volume"
@@ -54,7 +57,7 @@ export function TransportBar({
           min={0}
           max={1}
           step={0.01}
-          value={playback.volume}
+          value={volume}
           style={
             {
               "--range-progress": `${volumePercent}%`,

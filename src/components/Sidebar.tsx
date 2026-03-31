@@ -1,6 +1,7 @@
 import { animated, useReducedMotion, useSpring } from "@react-spring/web";
 import type { RefObject } from "react";
 import type { ArtistGroup, Track } from "../lib/types";
+import { VirtualList } from "./VirtualList";
 
 interface SidebarProps {
   artists: ArtistGroup[];
@@ -38,6 +39,9 @@ export function Sidebar({
   onFocusSearch,
 }: SidebarProps) {
   const reduceMotion = useReducedMotion();
+  const ARTIST_GROUP_ROW_HEIGHT = 44;
+  const ALBUM_ROW_HEIGHT = 42;
+  const TRACK_ROW_HEIGHT = 32;
   const [expandedPaneSpring] = useSpring(() => ({
     opacity: collapsed ? 0 : 1,
     x: collapsed ? -14 : 0,
@@ -116,9 +120,32 @@ export function Sidebar({
           </div>
 
           <div className="sidebar__section sidebar__section--grow">
-            <div className="artist-list">
-              {artists.map((artist) => (
-                <div key={artist.id} className="artist-list__group">
+            <VirtualList
+              items={artists}
+              className="artist-list"
+              itemClassName="artist-list__item"
+              virtualizationThreshold={36}
+              getKey={(artist) => artist.id}
+              getItemSize={(artist) => {
+                let size = ARTIST_GROUP_ROW_HEIGHT + 6;
+
+                if (selectedArtistId !== artist.id) {
+                  return size;
+                }
+
+                size += 10;
+                size += artist.albums.reduce((total, album) => {
+                  let albumSize = ALBUM_ROW_HEIGHT + 6;
+                  if (selectedAlbumId === album.id) {
+                    albumSize += 12 + album.tracks.length * (TRACK_ROW_HEIGHT + 2);
+                  }
+                  return total + albumSize;
+                }, 0);
+
+                return size;
+              }}
+              renderItem={(artist) => (
+                <div className="artist-list__group">
                   <button
                     className={`nav-item ${selectedArtistId === artist.id ? "nav-item--active" : ""}`}
                     onClick={() => {
@@ -167,8 +194,8 @@ export function Sidebar({
                     </div>
                   ) : null}
                 </div>
-              ))}
-            </div>
+              )}
+            />
           </div>
         </animated.div>
 

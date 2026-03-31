@@ -1,20 +1,15 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Track } from "./types";
 
-const mockReadAudioFile = vi.fn<[string], Promise<number[]>>();
-const mockDecodeAudioForPlayback = vi.fn<[string], Promise<number[]>>();
-const mockConvertFileSrc = vi.fn((path: string) => `file://${path}`);
-let blobUrlCounter = 0;
-const createObjectURL = vi.fn((blob: Blob) => `blob:${blob.type}:${blobUrlCounter++}`);
-const revokeObjectURL = vi.fn();
+const mockPrepareDecodedAudioForPlayback = vi.fn<[string], Promise<string>>();
+const mockConvertFileSrc = vi.fn((path: string, protocol = "asset") => `${protocol}://${path}`);
 
 vi.mock("./tauri", () => ({
-  readAudioFile: (path: string) => mockReadAudioFile(path),
-  decodeAudioForPlayback: (path: string) => mockDecodeAudioForPlayback(path),
+  prepareDecodedAudioForPlayback: (path: string) => mockPrepareDecodedAudioForPlayback(path),
 }));
 
 vi.mock("@tauri-apps/api/core", () => ({
-  convertFileSrc: (path: string) => mockConvertFileSrc(path),
+  convertFileSrc: (path: string, protocol?: string) => mockConvertFileSrc(path, protocol),
 }));
 
 type Listener = () => void;
@@ -69,7 +64,7 @@ class FakeAudio {
       return;
     }
 
-    if (this.src.includes("audio/flac") || this.src.endsWith(".flac")) {
+    if (this.src.endsWith(".flac")) {
       this.readyState = FakeAudio.HAVE_NOTHING;
       this.error = {
         code: 4,
@@ -157,13 +152,9 @@ const mp3Track: Track = {
 
 beforeEach(() => {
   vi.resetModules();
-  mockReadAudioFile.mockReset();
-  mockDecodeAudioForPlayback.mockReset();
+  mockPrepareDecodedAudioForPlayback.mockReset();
   mockConvertFileSrc.mockClear();
-  createObjectURL.mockClear();
-  revokeObjectURL.mockClear();
   FakeAudio.failures.clear();
-  blobUrlCounter = 0;
 
   vi.stubGlobal("Audio", FakeAudio);
   vi.stubGlobal("AudioContext", FakeAudioContext);
@@ -173,21 +164,10 @@ beforeEach(() => {
     MEDIA_ERR_DECODE: 3,
     MEDIA_ERR_SRC_NOT_SUPPORTED: 4,
   });
-
-  Object.defineProperty(URL, "createObjectURL", {
-    configurable: true,
-    writable: true,
-    value: createObjectURL,
-  });
-  Object.defineProperty(URL, "revokeObjectURL", {
-    configurable: true,
-    writable: true,
-    value: revokeObjectURL,
-  });
 });
 
 describe("AudioEngine", () => {
-  it("chooses decoded WAV first for packaged Windows builds", async () => {
+  it("chooses the native-file fallback first for packaged Windows builds", async () => {
     const { getTrackLoadStrategyOrder } = await import("./audio");
 
     expect(
@@ -195,10 +175,10 @@ describe("AudioEngine", () => {
         isDev: false,
         isWindows: true,
       }),
-    ).toEqual(["decoded-wav", "direct-file", "blob"]);
+    ).toEqual(["native-file", "direct-file", "decoded-wav"]);
   });
 
-  it("keeps the existing direct-first strategy outside packaged Windows builds", async () => {
+  it("keeps the direct-first strategy outside packaged Windows builds", async () => {
     const { getTrackLoadStrategyOrder } = await import("./audio");
 
     expect(
@@ -206,47 +186,42 @@ describe("AudioEngine", () => {
         isDev: true,
         isWindows: true,
       }),
-    ).toEqual(["direct-file", "blob", "decoded-wav"]);
+    ).toEqual(["direct-file", "native-file", "decoded-wav"]);
 
     expect(
       getTrackLoadStrategyOrder(flacTrack, {
         isDev: false,
         isWindows: false,
       }),
-    ).toEqual(["direct-file", "decoded-wav", "blob"]);
+    ).toEqual(["direct-file", "native-file", "decoded-wav"]);
   });
 
-  it("tries the direct file source first and then falls back to Rust-decoded WAV for FLAC", async () => {
-    mockDecodeAudioForPlayback.mockResolvedValue([10, 20, 30, 40]);
+  it("tries direct and native file sources before using the decoded WAV fallback for FLAC", async () => {
+    mockPrepareDecodedAudioForPlayback.mockResolvedValue("C:/app/playback/problematic.wav");
 
     const { AudioEngine } = await import("./audio");
     const engine = new AudioEngine();
 
     await engine.load(flacTrack, false);
 
-    expect(mockConvertFileSrc).toHaveBeenCalledWith(flacTrack.path);
-    expect(mockDecodeAudioForPlayback).toHaveBeenCalledWith(flacTrack.path);
-    expect(mockReadAudioFile).not.toHaveBeenCalled();
-    expect(createObjectURL).toHaveBeenCalledTimes(1);
-    expect(createObjectURL.mock.calls[0]?.[0]).toBeInstanceOf(Blob);
-    expect((createObjectURL.mock.calls[0]?.[0] as Blob).type).toBe("audio/wav");
+    expect(mockConvertFileSrc).toHaveBeenNthCalledWith(1, flacTrack.path, undefined);
+    expect(mockConvertFileSrc).toHaveBeenNthCalledWith(2, flacTrack.path, "playback");
+    expect(mockPrepareDecodedAudioForPlayback).toHaveBeenCalledWith(flacTrack.path);
+    expect(mockConvertFileSrc).toHaveBeenNthCalledWith(3, "C:/app/playback/problematic.wav", undefined);
   });
 
-  it("does not use blob or decode fallbacks for mp3 when the direct source succeeds", async () => {
+  it("does not use fallbacks for mp3 when the direct source succeeds", async () => {
     const { AudioEngine } = await import("./audio");
     const engine = new AudioEngine();
 
     await engine.load(mp3Track, false);
 
-    expect(mockConvertFileSrc).toHaveBeenCalledWith(mp3Track.path);
-    expect(mockReadAudioFile).not.toHaveBeenCalled();
-    expect(mockDecodeAudioForPlayback).not.toHaveBeenCalled();
-    expect(createObjectURL).not.toHaveBeenCalled();
+    expect(mockConvertFileSrc).toHaveBeenCalledWith(mp3Track.path, undefined);
+    expect(mockPrepareDecodedAudioForPlayback).not.toHaveBeenCalled();
   });
 
-  it("uses blob fallback for mp3 when the direct file source fails", async () => {
-    mockReadAudioFile.mockResolvedValue([1, 2, 3]);
-    FakeAudio.failures.set(`file://${mp3Track.path}`, {
+  it("uses the native-file fallback for mp3 when the direct source fails", async () => {
+    FakeAudio.failures.set(`asset://${mp3Track.path}`, {
       code: 2,
       message: "network error while loading media",
     });
@@ -256,21 +231,18 @@ describe("AudioEngine", () => {
 
     await engine.load(mp3Track, false);
 
-    expect(mockConvertFileSrc).toHaveBeenCalledWith(mp3Track.path);
-    expect(mockReadAudioFile).toHaveBeenCalledWith(mp3Track.path);
-    expect(mockDecodeAudioForPlayback).not.toHaveBeenCalled();
-    expect(createObjectURL).toHaveBeenCalledTimes(1);
-    expect((createObjectURL.mock.calls[0]?.[0] as Blob).type).toBe("audio/mpeg");
+    expect(mockConvertFileSrc).toHaveBeenNthCalledWith(1, mp3Track.path, undefined);
+    expect(mockConvertFileSrc).toHaveBeenNthCalledWith(2, mp3Track.path, "playback");
+    expect(mockPrepareDecodedAudioForPlayback).not.toHaveBeenCalled();
   });
 
-  it("uses decoded fallback after direct and blob failures when both are unsupported-source errors", async () => {
-    mockReadAudioFile.mockResolvedValue([1, 2, 3]);
-    mockDecodeAudioForPlayback.mockResolvedValue([10, 20, 30, 40]);
-    FakeAudio.failures.set(`file://${mp3Track.path}`, {
+  it("uses decoded fallback after direct and native failures when both are unsupported-source errors", async () => {
+    mockPrepareDecodedAudioForPlayback.mockResolvedValue("C:/app/playback/working.wav");
+    FakeAudio.failures.set(`asset://${mp3Track.path}`, {
       code: 4,
       message: "PipelineStatus::DEMUXER_ERROR_COULD_NOT_OPEN: FFmpegDemuxer: open context failed",
     });
-    FakeAudio.failures.set("blob:audio/mpeg:0", {
+    FakeAudio.failures.set(`playback://${mp3Track.path}`, {
       code: 4,
       message: "PipelineStatus::DEMUXER_ERROR_COULD_NOT_OPEN: FFmpegDemuxer: open context failed",
     });
@@ -280,21 +252,17 @@ describe("AudioEngine", () => {
 
     await engine.load(mp3Track, false);
 
-    expect(mockConvertFileSrc).toHaveBeenCalledWith(mp3Track.path);
-    expect(mockReadAudioFile).toHaveBeenCalledWith(mp3Track.path);
-    expect(mockDecodeAudioForPlayback).toHaveBeenCalledWith(mp3Track.path);
-    expect(createObjectURL).toHaveBeenCalledTimes(2);
-    expect((createObjectURL.mock.calls[1]?.[0] as Blob).type).toBe("audio/wav");
+    expect(mockPrepareDecodedAudioForPlayback).toHaveBeenCalledWith(mp3Track.path);
+    expect(mockConvertFileSrc).toHaveBeenNthCalledWith(3, "C:/app/playback/working.wav", undefined);
   });
 
-  it("uses decoded fallback as a final recovery path when direct and blob playback both fail", async () => {
-    mockReadAudioFile.mockResolvedValue([1, 2, 3]);
-    mockDecodeAudioForPlayback.mockResolvedValue([10, 20, 30, 40]);
-    FakeAudio.failures.set(`file://${mp3Track.path}`, {
+  it("uses decoded fallback as a final recovery path when direct and native playback both fail", async () => {
+    mockPrepareDecodedAudioForPlayback.mockResolvedValue("C:/app/playback/working.wav");
+    FakeAudio.failures.set(`asset://${mp3Track.path}`, {
       code: 2,
       message: "network error while loading media",
     });
-    FakeAudio.failures.set("blob:audio/mpeg:0", {
+    FakeAudio.failures.set(`playback://${mp3Track.path}`, {
       code: 3,
       message: "media decode error",
     });
@@ -304,28 +272,12 @@ describe("AudioEngine", () => {
 
     await engine.load(mp3Track, false);
 
-    expect(mockConvertFileSrc).toHaveBeenCalledWith(mp3Track.path);
-    expect(mockReadAudioFile).toHaveBeenCalledWith(mp3Track.path);
-    expect(mockDecodeAudioForPlayback).toHaveBeenCalledWith(mp3Track.path);
-    expect(createObjectURL).toHaveBeenCalledTimes(2);
-    expect((createObjectURL.mock.calls[1]?.[0] as Blob).type).toBe("audio/wav");
-  });
-
-  it("revokes the previous object URL when switching tracks after a fallback load", async () => {
-    mockDecodeAudioForPlayback.mockResolvedValue([10, 20, 30, 40]);
-
-    const { AudioEngine } = await import("./audio");
-    const engine = new AudioEngine();
-
-    await engine.load(flacTrack, false);
-    await engine.load(mp3Track, false);
-
-    expect(revokeObjectURL).toHaveBeenCalled();
-    expect(mockDecodeAudioForPlayback).toHaveBeenCalledTimes(1);
+    expect(mockPrepareDecodedAudioForPlayback).toHaveBeenCalledWith(mp3Track.path);
+    expect(mockConvertFileSrc).toHaveBeenNthCalledWith(3, "C:/app/playback/working.wav", undefined);
   });
 
   it("reset clears the active source and startup state after a fallback load", async () => {
-    mockDecodeAudioForPlayback.mockResolvedValue([10, 20, 30, 40]);
+    mockPrepareDecodedAudioForPlayback.mockResolvedValue("C:/app/playback/problematic.wav");
 
     const { AudioEngine } = await import("./audio");
     const engine = new AudioEngine();
@@ -336,7 +288,6 @@ describe("AudioEngine", () => {
 
     engine.reset();
 
-    expect(revokeObjectURL).toHaveBeenCalled();
     expect(mediaElement.src).toBe("");
     expect(mediaElement.currentSrc).toBe("");
     expect(mediaElement.currentTime).toBe(0);
@@ -345,13 +296,12 @@ describe("AudioEngine", () => {
   });
 
   it("reports the attempted source strategies when playback fails everywhere", async () => {
-    mockReadAudioFile.mockResolvedValue([1, 2, 3]);
-    mockDecodeAudioForPlayback.mockRejectedValue(new Error("decoder failed"));
-    FakeAudio.failures.set(`file://${mp3Track.path}`, {
+    mockPrepareDecodedAudioForPlayback.mockRejectedValue(new Error("decoder failed"));
+    FakeAudio.failures.set(`asset://${mp3Track.path}`, {
       code: 2,
       message: "network error while loading media",
     });
-    FakeAudio.failures.set("blob:audio/mpeg:0", {
+    FakeAudio.failures.set(`playback://${mp3Track.path}`, {
       code: 3,
       message: "media decode error",
     });
@@ -360,7 +310,7 @@ describe("AudioEngine", () => {
     const engine = new AudioEngine();
 
     await expect(engine.load(mp3Track, false)).rejects.toThrow(
-      'Playback could not start for "Problematic" after trying direct-file, blob, decoded-wav.',
+      'Playback could not start for "Problematic" after trying direct-file, native-file, decoded-wav.',
     );
   });
 });

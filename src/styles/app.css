@@ -598,12 +598,14 @@ button {
 }
 
 .artist-list {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
   max-height: 100%;
   overflow: auto;
   padding-right: 4px;
+  position: relative;
+}
+
+.artist-list__item {
+  padding-bottom: 6px;
 }
 
 .artist-list__albums {
@@ -1279,12 +1281,14 @@ button {
 }
 
 .library-stage__album-list {
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
   min-height: 0;
   overflow: auto;
   padding: 0 4px 0 0;
+  position: relative;
+}
+
+.library-stage__album-track-row {
+  padding-bottom: 3px;
 }
 
 .library-stage__album-track {
@@ -1423,10 +1427,13 @@ button {
 }
 
 .queue__list {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
   overflow: auto;
+  position: relative;
+  padding-right: 4px;
+}
+
+.queue__item {
+  padding-bottom: 8px;
 }
 
 .queue-row {
@@ -1437,6 +1444,11 @@ button {
   padding: 12px;
   border: 1px solid transparent;
   border-radius: 12px;
+}
+
+.virtual-list__inner {
+  position: relative;
+  min-height: 100%;
 }
 
 .queue-row__meta {

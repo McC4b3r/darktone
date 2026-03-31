@@ -1,5 +1,5 @@
 import { convertFileSrc } from "@tauri-apps/api/core";
-import { decodeAudioForPlayback, readAudioFile } from "./tauri";
+import { prepareDecodedAudioForPlayback } from "./tauri";
 import type { Track } from "./types";
 
 export type AudioCallbacks = {
@@ -10,8 +10,9 @@ export type AudioCallbacks = {
 };
 
 const PLAYBACK_DEBUG_STORAGE_KEY = "darktone:debug-playback";
+const PLAYBACK_FILE_PROTOCOL = "playback";
 
-export type PlaybackSourceStrategy = "decoded-wav" | "direct-file" | "blob";
+export type PlaybackSourceStrategy = "decoded-wav" | "direct-file" | "native-file";
 
 type PlaybackEnvironment = {
   isDev: boolean;
@@ -49,24 +50,19 @@ function detectPlaybackEnvironment(): PlaybackEnvironment {
 }
 
 export function getTrackLoadStrategyOrder(
-  track: Track,
+  _track: Track,
   environment: PlaybackEnvironment = detectPlaybackEnvironment(),
 ): PlaybackSourceStrategy[] {
   if (!environment.isDev && environment.isWindows) {
-    return ["decoded-wav", "direct-file", "blob"];
+    return ["native-file", "direct-file", "decoded-wav"];
   }
 
-  if (track.format === "flac") {
-    return ["direct-file", "decoded-wav", "blob"];
-  }
-
-  return ["direct-file", "blob", "decoded-wav"];
+  return ["direct-file", "native-file", "decoded-wav"];
 }
 
 export class AudioEngine {
   private audio: HTMLAudioElement;
   private callbacks: AudioCallbacks = {};
-  private objectUrl: string | null = null;
   private loadedTrackId: string | null = null;
   private loadingSource = false;
   private audioContext: AudioContext | null = null;
@@ -169,19 +165,6 @@ export class AudioEngine {
     return this.outputNode;
   }
 
-  private revokeObjectUrl() {
-    if (this.objectUrl) {
-      URL.revokeObjectURL(this.objectUrl);
-      this.objectUrl = null;
-    }
-  }
-
-  private setObjectUrl(blob: Blob) {
-    this.revokeObjectUrl();
-    this.objectUrl = URL.createObjectURL(blob);
-    return this.objectUrl;
-  }
-
   private describeMediaError() {
     const error = this.audio.error;
     if (!error) {
@@ -200,13 +183,6 @@ export class AudioEngine {
               : "unknown media error";
 
     return error.message ? `${codeLabel}: ${error.message}` : codeLabel;
-  }
-
-  private getMimeType(track: Track) {
-    if (track.format === "mp3") return "audio/mpeg";
-    if (track.format === "wav") return "audio/wav";
-    if (track.format === "flac") return "audio/flac";
-    return "application/octet-stream";
   }
 
   private async waitForLoadResult() {
@@ -242,7 +218,6 @@ export class AudioEngine {
   private async assignSource(src: string) {
     logPlaybackDebug("assigning source", {
       src,
-      hadObjectUrl: Boolean(this.objectUrl),
       loadedTrackId: this.loadedTrackId,
     });
     this.audio.pause();
@@ -251,16 +226,13 @@ export class AudioEngine {
     await this.waitForLoadResult();
   }
 
-  private async assignBlobSource(track: Track) {
-    const bytes = await readAudioFile(track.path);
-    const blob = new Blob([new Uint8Array(bytes)], { type: this.getMimeType(track) });
-    await this.assignSource(this.setObjectUrl(blob));
+  private async assignNativeFileSource(track: Track) {
+    await this.assignSource(convertFileSrc(track.path, PLAYBACK_FILE_PROTOCOL));
   }
 
   private async assignDecodedSource(track: Track) {
-    const bytes = await decodeAudioForPlayback(track.path);
-    const blob = new Blob([new Uint8Array(bytes)], { type: "audio/wav" });
-    await this.assignSource(this.setObjectUrl(blob));
+    const decodedPath = await prepareDecodedAudioForPlayback(track.path);
+    await this.assignSource(convertFileSrc(decodedPath));
   }
 
   private shouldUseDecodedFallback(error: Error) {
@@ -302,8 +274,8 @@ export class AudioEngine {
       return;
     }
 
-    if (strategy === "blob") {
-      await this.loadBlobFallback(track);
+    if (strategy === "native-file") {
+      await this.loadNativeFileFallback(track);
       return;
     }
 
@@ -369,10 +341,10 @@ export class AudioEngine {
     });
   }
 
-  private async loadBlobFallback(track: Track) {
+  private async loadNativeFileFallback(track: Track) {
     const startedAt = performance.now();
-    await this.assignBlobSource(track);
-    logPlaybackDebug("loaded blob fallback", {
+    await this.assignNativeFileSource(track);
+    logPlaybackDebug("loaded native-file fallback", {
       trackId: track.id,
       format: track.format,
       path: track.path,
@@ -393,7 +365,6 @@ export class AudioEngine {
 
   async load(track: Track, autoPlay = true) {
     const startedAt = performance.now();
-    this.revokeObjectUrl();
     this.loadedTrackId = track.id;
     this.loadingSource = true;
 
@@ -508,9 +479,7 @@ export class AudioEngine {
     logPlaybackDebug("resetting audio engine", {
       loadedTrackId: this.loadedTrackId,
       currentSrc: this.audio.currentSrc || this.audio.src || null,
-      hadObjectUrl: Boolean(this.objectUrl),
     });
-    this.revokeObjectUrl();
     this.loadedTrackId = null;
     this.loadingSource = false;
     this.audio.pause();

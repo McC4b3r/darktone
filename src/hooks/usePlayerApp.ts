@@ -9,8 +9,34 @@ import {
   UNKNOWN_ARTIST,
 } from "../lib/library";
 import { getNextQueueIndex, getPreviousQueueIndex, makeQueue, moveQueueItem, removeQueueItem } from "../lib/queue";
-import { LIBRARY_SCAN_PROGRESS_EVENT, loadLibrary, loadSettings, pickMusicFolders, saveSettings, scanLibrary, watchMusicFolders } from "../lib/tauri";
-import type { AppSettings, LibraryData, LibraryScanProgress, PlaybackState, QueueItem, RepeatMode, Track } from "../lib/types";
+import {
+  LIBRARY_SCAN_PROGRESS_EVENT,
+  loadLibrary,
+  loadSettings,
+  pickMusicFolders,
+  saveSettings,
+  scanLibrary,
+  syncLibraryChanges as syncLibraryChangesCommand,
+  watchMusicFolders,
+} from "../lib/tauri";
+import {
+  getPlaybackProgress,
+  resetPlaybackProgress,
+  setPlaybackProgress,
+} from "../lib/playbackProgress";
+import type {
+  AppSettings,
+  LibraryData,
+  LibraryScanProgress,
+  LibraryScanResult,
+  LibrarySyncResult,
+  PlaybackState,
+  QueueItem,
+  RepeatMode,
+  Track,
+} from "../lib/types";
+
+type PlaybackControlsState = Omit<PlaybackState, "currentTime" | "duration">;
 
 const DEFAULT_SETTINGS: AppSettings = {
   musicFolders: [],
@@ -111,6 +137,45 @@ function formatProgressMessage(progress: LibraryScanProgress) {
   return `Indexing track ${progress.current} of ${progress.total}${folderPart} (${percent}%).`;
 }
 
+function formatFullRefreshMessage(result: LibraryScanResult, folderCount: number) {
+  const indexedMessage = `Indexed ${result.scannedFiles} files from ${folderCount} folder${folderCount === 1 ? "" : "s"}.`;
+  const skippedParts = [
+    result.unsupportedFiles > 0
+      ? `${result.unsupportedFiles} skipped because only MP3, WAV, and FLAC are supported right now`
+      : null,
+    result.unreadableEntries > 0
+      ? `${result.unreadableEntries} folders or files could not be traversed`
+      : null,
+    result.unreadableAudioFiles > 0
+      ? `${result.unreadableAudioFiles} audio files could not be opened or parsed`
+      : null,
+  ].filter(Boolean);
+  const skippedMessage = skippedParts.length > 0 ? ` ${skippedParts.join(". ")}.` : "";
+
+  return `${indexedMessage}${skippedMessage}`;
+}
+
+function formatIncrementalSyncMessage(result: LibrarySyncResult) {
+  const changeParts = [
+    result.addedFiles > 0 ? `${result.addedFiles} added` : null,
+    result.updatedFiles > 0 ? `${result.updatedFiles} updated` : null,
+    result.removedFiles > 0 ? `${result.removedFiles} removed` : null,
+  ].filter(Boolean);
+  const issueParts = [
+    result.unreadableEntries > 0 ? `${result.unreadableEntries} folders or files could not be traversed` : null,
+    result.unreadableAudioFiles > 0 ? `${result.unreadableAudioFiles} audio files could not be opened or parsed` : null,
+  ].filter(Boolean);
+  const baseMessage =
+    changeParts.length > 0
+      ? `Library updated: ${changeParts.join(", ")}.`
+      : result.scannedFiles > 0
+        ? `Library sync checked ${result.scannedFiles} file${result.scannedFiles === 1 ? "" : "s"}.`
+        : "Library watch is up to date.";
+  const issueMessage = issueParts.length > 0 ? ` ${issueParts.join(". ")}.` : "";
+
+  return `${baseMessage}${issueMessage}`;
+}
+
 export function usePlayerApp() {
   const [library, setLibrary] = useState<LibraryData>(EMPTY_LIBRARY);
   const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
@@ -125,10 +190,8 @@ export function usePlayerApp() {
   const [syncMessage, setSyncMessage] = useState("Loading library…");
   const [scanProgress, setScanProgress] = useState<LibraryScanProgress | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [playback, setPlayback] = useState<PlaybackState>({
+  const [playbackState, setPlaybackState] = useState<PlaybackControlsState>({
     currentTrackId: null,
-    currentTime: 0,
-    duration: 0,
     isPlaying: false,
     volume: DEFAULT_SETTINGS.volume,
     muted: DEFAULT_SETTINGS.muted,
@@ -139,6 +202,9 @@ export function usePlayerApp() {
   const hasInitializedRef = useRef(false);
   const refreshTimeoutRef = useRef<number | null>(null);
   const unwatchFoldersRef = useRef<(() => void) | null>(null);
+  const pendingChangedPathsRef = useRef<Set<string>>(new Set());
+  const watcherSyncInFlightRef = useRef(false);
+  const syncChangedPathsRef = useRef<(changedPaths: string[], announce?: boolean) => Promise<void>>(async () => undefined);
 
   const normalizedLibrary = useMemo(() => normalizeLibrary(library), [library]);
   const filteredLibrary = useMemo(
@@ -165,19 +231,27 @@ export function usePlayerApp() {
     (selectedArtist ? selectedArtist.albums.flatMap((artistAlbum) => artistAlbum.tracks) : filteredLibrary.tracks);
   const queuedTrack = currentIndex >= 0 ? tracksById.get(queue[currentIndex]?.trackId ?? "") ?? null : null;
   const currentTrack =
-    (playback.currentTrackId ? tracksById.get(playback.currentTrackId) ?? null : null) ?? queuedTrack;
+    (playbackState.currentTrackId ? tracksById.get(playbackState.currentTrackId) ?? null : null) ?? queuedTrack;
   const currentAlbum =
     (currentTrack ? allAlbums.find((album) => album.tracks.some((track) => track.id === currentTrack.id)) ?? null : null) ??
     selectedAlbum ??
     (selectedArtist?.albums[0] ?? null);
+  const playback = {
+    ...playbackState,
+    ...getPlaybackProgress(),
+  } satisfies PlaybackState;
+  const queueRef = useRef(queue);
+  queueRef.current = queue;
+  const currentTrackRef = useRef(currentTrack);
+  currentTrackRef.current = currentTrack;
 
   useEffect(() => {
     audioEngine.setCallbacks({
       onTimeUpdate: (currentTime, duration) => {
-        setPlayback((state) => ({ ...state, currentTime, duration }));
+        setPlaybackProgress({ currentTime, duration });
       },
       onPlayStateChange: (isPlaying) => {
-        setPlayback((state) => ({ ...state, isPlaying }));
+        setPlaybackState((state) => (state.isPlaying === isPlaying ? state : { ...state, isPlaying }));
       },
       onEnded: () => {
         void playNext();
@@ -222,19 +296,23 @@ export function usePlayerApp() {
     if (!hasInitializedRef.current || settings.musicFolders.length === 0) {
       unwatchFoldersRef.current?.();
       unwatchFoldersRef.current = null;
+      pendingChangedPathsRef.current.clear();
       return;
     }
 
     let disposed = false;
 
-    void watchMusicFolders(settings.musicFolders, () => {
+    void watchMusicFolders(settings.musicFolders, (changedPaths) => {
       if (disposed) return;
+      for (const changedPath of changedPaths) {
+        pendingChangedPathsRef.current.add(changedPath);
+      }
       if (refreshTimeoutRef.current !== null) {
         window.clearTimeout(refreshTimeoutRef.current);
       }
       refreshTimeoutRef.current = window.setTimeout(() => {
         refreshTimeoutRef.current = null;
-        void refreshLibrary(settings.musicFolders, false);
+        void processPendingWatchedChanges();
       }, 900);
     }).then((unwatch) => {
       if (disposed) {
@@ -254,50 +332,26 @@ export function usePlayerApp() {
         window.clearTimeout(refreshTimeoutRef.current);
         refreshTimeoutRef.current = null;
       }
+      pendingChangedPathsRef.current.clear();
       unwatchFoldersRef.current?.();
       unwatchFoldersRef.current = null;
     };
-  }, [refreshLibrary, settings.musicFolders]);
+  }, [settings.musicFolders]);
 
   useEffect(() => {
-    async function refreshOnFocus() {
-      if (!hasInitializedRef.current || settings.musicFolders.length === 0) return;
-      await refreshLibrary(settings.musicFolders, false);
-    }
-
-    function onWindowFocus() {
-      void refreshOnFocus();
-    }
-
-    function onVisibilityChange() {
-      if (document.visibilityState === "visible") {
-        void refreshOnFocus();
-      }
-    }
-
-    window.addEventListener("focus", onWindowFocus);
-    document.addEventListener("visibilitychange", onVisibilityChange);
-
-    return () => {
-      window.removeEventListener("focus", onWindowFocus);
-      document.removeEventListener("visibilitychange", onVisibilityChange);
-    };
-  }, [refreshLibrary, settings.musicFolders]);
-
-  useEffect(() => {
-    audioEngine.setVolume(playback.volume);
-    audioEngine.setMuted(playback.muted);
-  }, [playback.volume, playback.muted]);
+    audioEngine.setVolume(playbackState.volume);
+    audioEngine.setMuted(playbackState.muted);
+  }, [playbackState.volume, playbackState.muted]);
 
   useEffect(() => {
     if (!hasInitializedRef.current) return;
 
     const nextSettings: AppSettings = {
       ...settings,
-      volume: playback.volume,
-      muted: playback.muted,
-      repeatMode: playback.repeatMode,
-      shuffle: playback.shuffle,
+      volume: playbackState.volume,
+      muted: playbackState.muted,
+      repeatMode: playbackState.repeatMode,
+      shuffle: playbackState.shuffle,
       queueTrackIds: queue.map((item) => item.trackId),
       currentTrackId: currentTrack?.id ?? null,
     };
@@ -308,13 +362,14 @@ export function usePlayerApp() {
     });
     // We intentionally persist when queue/playback values change.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [queue, currentTrack?.id, playback.volume, playback.muted, playback.repeatMode, playback.shuffle]);
+  }, [queue, currentTrack?.id, playbackState.volume, playbackState.muted, playbackState.repeatMode, playbackState.shuffle]);
 
   async function initialize() {
     try {
       setLoading(true);
       setError(null);
       audioEngine.reset();
+      resetPlaybackProgress();
       const [storedSettings, storedLibrary] = await Promise.all([
         loadSettings().catch(() => DEFAULT_SETTINGS),
         loadLibrary().catch(() => EMPTY_LIBRARY),
@@ -332,11 +387,9 @@ export function usePlayerApp() {
       });
       setSettings(storedSettings);
       setLibrary(nextLibrary);
-      setPlayback((state) => ({
+      setPlaybackState((state) => ({
         ...state,
         currentTrackId: restoredCurrentTrack,
-        currentTime: 0,
-        duration: 0,
         isPlaying: false,
         volume: storedSettings.volume,
         muted: storedSettings.muted,
@@ -374,38 +427,8 @@ export function usePlayerApp() {
       const result = await scanLibrary(folders);
       const normalized = normalizeLibrary(result.library);
 
-      setLibrary(normalized);
-      const indexedMessage = `Indexed ${result.scannedFiles} files from ${folders.length} folder${folders.length === 1 ? "" : "s"}.`;
-      const skippedParts = [
-        result.unsupportedFiles > 0
-          ? `${result.unsupportedFiles} skipped because only MP3, WAV, and FLAC are supported right now`
-          : null,
-        result.unreadableEntries > 0
-          ? `${result.unreadableEntries} folders or files could not be traversed`
-          : null,
-        result.unreadableAudioFiles > 0
-          ? `${result.unreadableAudioFiles} audio files could not be opened or parsed`
-          : null,
-      ].filter(Boolean);
-      const skippedMessage = skippedParts.length > 0 ? ` ${skippedParts.join(". ")}.` : "";
-      setSyncMessage(`${indexedMessage}${skippedMessage}`);
-
-      const validQueueTrackIds = queue
-        .map((item) => item.trackId)
-        .filter((trackId) => normalized.tracks.some((track) => track.id === trackId));
-      setQueue(makeQueue(validQueueTrackIds));
-
-      if (currentTrack && !normalized.tracks.some((track) => track.id === currentTrack.id)) {
-        setCurrentIndex(-1);
-        setPlayback((state) => ({
-          ...state,
-          currentTrackId: null,
-          isPlaying: false,
-          currentTime: 0,
-          duration: 0,
-        }));
-        audioEngine.reset();
-      }
+      applyLibrarySnapshot(normalized);
+      setSyncMessage(formatFullRefreshMessage(result, folders.length));
     } catch (cause) {
       console.error(cause);
       setError(getErrorMessage(cause, "Library refresh failed"));
@@ -413,6 +436,89 @@ export function usePlayerApp() {
     } finally {
       setIsSyncing(false);
       setScanProgress(null);
+    }
+  }
+
+  async function syncChangedPaths(changedPaths: string[], announce = false) {
+    if (!changedPaths.length) return;
+
+    try {
+      setError(null);
+      if (announce) {
+        setIsSyncing(true);
+        setScanProgress(null);
+        setSyncMessage("Syncing library changes…");
+      }
+
+      const result = await syncLibraryChangesCommand(changedPaths);
+      const normalized = normalizeLibrary(result.library);
+      applyLibrarySnapshot(normalized);
+
+      const hasVisibleChange =
+        result.addedFiles > 0 ||
+        result.updatedFiles > 0 ||
+        result.removedFiles > 0 ||
+        result.unreadableEntries > 0 ||
+        result.unreadableAudioFiles > 0;
+      if (announce || hasVisibleChange) {
+        setSyncMessage(formatIncrementalSyncMessage(result));
+      }
+    } catch (cause) {
+      console.error(cause);
+      setError(getErrorMessage(cause, "Library sync failed"));
+      if (announce) {
+        setSyncMessage("Sync failed.");
+      }
+    } finally {
+      if (announce) {
+        setIsSyncing(false);
+        setScanProgress(null);
+      }
+    }
+  }
+
+  syncChangedPathsRef.current = syncChangedPaths;
+
+  function applyLibrarySnapshot(nextLibrary: LibraryData) {
+    setLibrary(nextLibrary);
+
+    const validQueueTrackIds = queueRef.current
+      .map((item) => item.trackId)
+      .filter((trackId) => nextLibrary.tracks.some((track) => track.id === trackId));
+    setQueue(makeQueue(validQueueTrackIds));
+
+    if (currentTrackRef.current && !nextLibrary.tracks.some((track) => track.id === currentTrackRef.current?.id)) {
+      setCurrentIndex(-1);
+      setPlaybackState((state) => ({
+        ...state,
+        currentTrackId: null,
+        isPlaying: false,
+      }));
+      resetPlaybackProgress();
+      audioEngine.reset();
+    }
+  }
+
+  async function processPendingWatchedChanges() {
+    if (watcherSyncInFlightRef.current) {
+      return;
+    }
+
+    const changedPaths = Array.from(pendingChangedPathsRef.current);
+    if (!changedPaths.length) {
+      return;
+    }
+
+    pendingChangedPathsRef.current.clear();
+    watcherSyncInFlightRef.current = true;
+
+    try {
+      await syncChangedPathsRef.current(changedPaths, false);
+    } finally {
+      watcherSyncInFlightRef.current = false;
+      if (pendingChangedPathsRef.current.size > 0) {
+        void processPendingWatchedChanges();
+      }
     }
   }
 
@@ -452,12 +558,14 @@ export function usePlayerApp() {
 
       setQueue(nextQueue);
       setCurrentIndex(nextIndex);
-      setPlayback((state) => ({
+      setPlaybackState((state) => ({
         ...state,
         currentTrackId: track.id,
+      }));
+      setPlaybackProgress({
         currentTime: 0,
         duration: track.durationMs / 1000,
-      }));
+      });
       logPlaybackDebug("track selected from library", {
         trackId: track.id,
         format: track.format,
@@ -484,12 +592,14 @@ export function usePlayerApp() {
       if (!track) return;
 
       setCurrentIndex(index);
-      setPlayback((state) => ({
+      setPlaybackState((state) => ({
         ...state,
         currentTrackId: track.id,
+      }));
+      setPlaybackProgress({
         currentTime: 0,
         duration: track.durationMs / 1000,
-      }));
+      });
       logPlaybackDebug("queue track selected", {
         trackId: track.id,
         format: track.format,
@@ -512,13 +622,13 @@ export function usePlayerApp() {
   async function togglePlay() {
     try {
       setError(null);
-      if (playback.isPlaying) {
+      if (playbackState.isPlaying) {
         audioEngine.pause();
         return;
       }
 
       if (currentTrack) {
-        await audioEngine.resume(currentTrack, playback.currentTime);
+        await audioEngine.resume(currentTrack, getPlaybackProgress().currentTime);
         return;
       }
 
@@ -537,9 +647,9 @@ export function usePlayerApp() {
   }
 
   async function playNext() {
-    const nextIndex = getNextQueueIndex(queue, currentIndex, playback.repeatMode, playback.shuffle);
+    const nextIndex = getNextQueueIndex(queue, currentIndex, playbackState.repeatMode, playbackState.shuffle);
     if (nextIndex === -1) {
-      setPlayback((state) => ({ ...state, isPlaying: false }));
+      setPlaybackState((state) => ({ ...state, isPlaying: false }));
       return;
     }
     await playQueueIndex(nextIndex);
@@ -547,7 +657,7 @@ export function usePlayerApp() {
 
   async function playPrevious() {
     if (!queue.length) return;
-    const previousIndex = getPreviousQueueIndex(currentIndex <= 0 ? 0 : currentIndex, playback.currentTime);
+    const previousIndex = getPreviousQueueIndex(currentIndex <= 0 ? 0 : currentIndex, getPlaybackProgress().currentTime);
     await playQueueIndex(previousIndex);
   }
 
@@ -589,13 +699,12 @@ export function usePlayerApp() {
     if (index === currentIndex) {
       audioEngine.reset();
       setCurrentIndex(-1);
-      setPlayback((state) => ({
+      setPlaybackState((state) => ({
         ...state,
         currentTrackId: null,
         isPlaying: false,
-        currentTime: 0,
-        duration: 0,
       }));
+      resetPlaybackProgress();
       return;
     }
 
@@ -605,24 +714,24 @@ export function usePlayerApp() {
   }
 
   function setVolume(volume: number) {
-    setPlayback((state) => ({ ...state, volume, muted: volume === 0 ? true : false }));
+    setPlaybackState((state) => ({ ...state, volume, muted: volume === 0 ? true : false }));
   }
 
   function toggleMute() {
-    setPlayback((state) => ({ ...state, muted: !state.muted }));
+    setPlaybackState((state) => ({ ...state, muted: !state.muted }));
   }
 
   function toggleShuffle() {
-    setPlayback((state) => ({ ...state, shuffle: !state.shuffle }));
+    setPlaybackState((state) => ({ ...state, shuffle: !state.shuffle }));
   }
 
   function cycleRepeat() {
-    setPlayback((state) => ({ ...state, repeatMode: cycleRepeatMode(state.repeatMode) }));
+    setPlaybackState((state) => ({ ...state, repeatMode: cycleRepeatMode(state.repeatMode) }));
   }
 
   function seek(seconds: number) {
     audioEngine.seek(seconds);
-    setPlayback((state) => ({ ...state, currentTime: seconds }));
+    setPlaybackProgress((state) => ({ ...state, currentTime: seconds }));
   }
 
   function chooseArtist(artistId: string | null) {

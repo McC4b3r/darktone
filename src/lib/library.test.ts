@@ -60,6 +60,24 @@ describe("library helpers", () => {
     expect(filtered.tracks[0].id).toBe("2");
   });
 
+  it("reuses normalized tracks while filtering normalized libraries", () => {
+    const normalized = normalizeLibrary(library);
+    const filtered = filterLibrary(normalized, "track two");
+    const trackTwo = normalized.tracks.find((track) => track.id === "2");
+
+    expect(filtered.tracks).toHaveLength(1);
+    expect(filtered.tracks[0]).toBe(trackTwo);
+  });
+
+  it("reuses normalized tracks while grouping normalized libraries", () => {
+    const normalized = normalizeLibrary(library);
+    const grouped = groupLibrary(normalized);
+    const artistAlbum = grouped.find((artist) => artist.name === "Artist A")?.albums.find((album) => album.title === "Album A");
+    const trackTwo = normalized.tracks.find((track) => track.id === "2");
+
+    expect(artistAlbum?.tracks[0]).toBe(trackTwo);
+  });
+
   it("deduplicates tracks by id during normalization", () => {
     const duplicated: LibraryData = {
       ...library,

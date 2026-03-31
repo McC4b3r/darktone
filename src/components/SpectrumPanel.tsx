@@ -2,15 +2,12 @@ import { useEffect, useRef } from "react";
 import AudioMotionAnalyzer from "audiomotion-analyzer";
 import { formatTime } from "../lib/library";
 import { audioEngine } from "../lib/audio";
-import type { PlaybackState } from "../lib/types";
+import { usePlaybackProgress } from "../lib/playbackProgress";
 
-interface SpectrumPanelProps {
-  playback: PlaybackState;
-}
-
-export function SpectrumPanel({ playback }: SpectrumPanelProps) {
+export function SpectrumPanel() {
   const containerRef = useRef<HTMLDivElement>(null);
   const analyzerRef = useRef<AudioMotionAnalyzer | null>(null);
+  const playbackProgress = usePlaybackProgress();
 
   useEffect(() => {
     if (!containerRef.current || analyzerRef.current) return;
@@ -67,7 +64,7 @@ export function SpectrumPanel({ playback }: SpectrumPanelProps) {
     <div className="library-stage__meter panel">
       <div className="library-stage__meter-head">
         <span className="library-stage__meter-time">
-          {formatTime(playback.currentTime)} / {formatTime(playback.duration)}
+          {formatTime(playbackProgress.currentTime)} / {formatTime(playbackProgress.duration)}
         </span>
       </div>
       <div ref={containerRef} className="library-stage__spectrum-canvas" />

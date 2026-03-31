@@ -2,12 +2,13 @@ import { useEffect, useRef } from "react";
 import AudioMotionAnalyzer from "audiomotion-analyzer";
 import { audioEngine } from "../lib/audio";
 import { formatTime } from "../lib/library";
-import type { Album, PlaybackState, Track } from "../lib/types";
+import { usePlaybackProgress } from "../lib/playbackProgress";
+import type { Album, Track } from "../lib/types";
 
 interface NowPlayingPanelProps {
   album: Album;
   track: Track | null;
-  playback: PlaybackState;
+  isPlaying: boolean;
   onTogglePlay: () => void;
   onPrevious: () => void;
   onNext: () => void;
@@ -16,14 +17,15 @@ interface NowPlayingPanelProps {
 export function NowPlayingPanel({
   album,
   track,
-  playback,
+  isPlaying,
   onTogglePlay,
   onPrevious,
   onNext,
 }: NowPlayingPanelProps) {
   const visualRef = useRef<HTMLDivElement>(null);
   const analyzerRef = useRef<AudioMotionAnalyzer | null>(null);
-  const remaining = Math.max(playback.duration - playback.currentTime, 0);
+  const playbackProgress = usePlaybackProgress();
+  const remaining = Math.max(playbackProgress.duration - playbackProgress.currentTime, 0);
 
   useEffect(() => {
     if (!visualRef.current || analyzerRef.current) return;
@@ -100,10 +102,10 @@ export function NowPlayingPanel({
           <button
             className="button button--primary library-stage__play-toggle"
             onClick={onTogglePlay}
-            aria-label={playback.isPlaying ? "Pause" : "Play"}
+            aria-label={isPlaying ? "Pause" : "Play"}
           >
             <span
-              className={`transport-glyph ${playback.isPlaying ? "transport-glyph--pause" : "transport-glyph--play"}`}
+              className={`transport-glyph ${isPlaying ? "transport-glyph--pause" : "transport-glyph--play"}`}
               aria-hidden="true"
             />
           </button>

@@ -1,14 +1,14 @@
 import { AlbumPanel } from "./AlbumPanel";
 import { NowPlayingPanel } from "./NowPlayingPanel";
 import { SpectrumPanel } from "./SpectrumPanel";
-import type { Album, ArtistGroup, PlaybackState, Track } from "../lib/types";
+import type { Album, ArtistGroup, Track } from "../lib/types";
 
 interface LibraryStageProps {
   artist: ArtistGroup | null;
   album: Album | null;
   nowPlayingAlbum: Album | null;
   track: Track | null;
-  playback: PlaybackState;
+  isPlaying: boolean;
   onTogglePlay: () => void;
   onPrevious: () => void;
   onNext: () => void;
@@ -21,7 +21,7 @@ export function LibraryStage({
   album,
   nowPlayingAlbum,
   track,
-  playback,
+  isPlaying,
   onTogglePlay,
   onPrevious,
   onNext,
@@ -40,7 +40,7 @@ export function LibraryStage({
         <NowPlayingPanel
           album={heroAlbum}
           track={track}
-          playback={playback}
+          isPlaying={isPlaying}
           onTogglePlay={onTogglePlay}
           onPrevious={onPrevious}
           onNext={onNext}
@@ -52,7 +52,7 @@ export function LibraryStage({
           onSelectAlbum={onSelectAlbum}
           onSelectTrack={onSelectTrack}
         />
-        <SpectrumPanel playback={playback} />
+        <SpectrumPanel />
       </div>
     </section>
   );

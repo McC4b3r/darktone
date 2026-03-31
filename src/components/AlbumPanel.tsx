@@ -2,6 +2,7 @@ import { convertFileSrc } from "@tauri-apps/api/core";
 import { UNKNOWN_ALBUM, formatTime } from "../lib/library";
 import type { Album, ArtistGroup, Track } from "../lib/types";
 import { AlbumGrid } from "./AlbumGrid";
+import { VirtualList } from "./VirtualList";
 
 interface AlbumPanelProps {
   artist: ArtistGroup | null;
@@ -21,10 +22,16 @@ function TrackList({
   onSelectTrack: (track: Track, albumTracks: Track[]) => void;
 }) {
   return (
-    <div className="library-stage__album-list" role="list">
-      {tracks.map((albumTrack, index) => (
+    <VirtualList
+      items={tracks}
+      className="library-stage__album-list"
+      itemClassName="library-stage__album-track-row"
+      role="list"
+      virtualizationThreshold={28}
+      getKey={(albumTrack) => albumTrack.id}
+      getItemSize={() => 43}
+      renderItem={(albumTrack, index) => (
         <button
-          key={albumTrack.id}
           className={`library-stage__album-track ${currentTrackId === albumTrack.id ? "library-stage__album-track--active" : ""}`}
           onClick={() => onSelectTrack(albumTrack, tracks)}
         >
@@ -34,8 +41,8 @@ function TrackList({
           </span>
           <span className="library-stage__album-duration">{formatTime(albumTrack.durationMs / 1000)}</span>
         </button>
-      ))}
-    </div>
+      )}
+    />
   );
 }
 

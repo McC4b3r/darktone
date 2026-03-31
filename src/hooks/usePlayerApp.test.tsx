@@ -19,9 +19,10 @@ const mockListen = vi.fn();
 const mockLoadSettings = vi.fn<[], Promise<AppSettings>>();
 const mockLoadLibrary = vi.fn<[], Promise<LibraryData>>();
 const mockSaveSettings = vi.fn<[AppSettings], Promise<void>>();
-const mockWatchMusicFolders = vi.fn<[string[], () => void], Promise<() => void>>();
+const mockWatchMusicFolders = vi.fn<[string[], (paths: string[]) => void], Promise<() => void>>();
 const mockPickMusicFolders = vi.fn();
 const mockScanLibrary = vi.fn();
+const mockSyncLibraryChanges = vi.fn();
 
 const mockAudioEngine = {
   setCallbacks: vi.fn(),
@@ -45,9 +46,10 @@ vi.mock("../lib/tauri", () => ({
   loadSettings: () => mockLoadSettings(),
   loadLibrary: () => mockLoadLibrary(),
   saveSettings: (settings: AppSettings) => mockSaveSettings(settings),
-  watchMusicFolders: (folders: string[], onChange: () => void) => mockWatchMusicFolders(folders, onChange),
+  watchMusicFolders: (folders: string[], onChange: (paths: string[]) => void) => mockWatchMusicFolders(folders, onChange),
   pickMusicFolders: () => mockPickMusicFolders(),
   scanLibrary: (...args: unknown[]) => mockScanLibrary(...args),
+  syncLibraryChanges: (...args: unknown[]) => mockSyncLibraryChanges(...args),
 }));
 
 vi.mock("../lib/audio", () => ({
@@ -100,6 +102,15 @@ describe("usePlayerApp", () => {
     mockLoadLibrary.mockResolvedValue(library);
     mockSaveSettings.mockResolvedValue(undefined);
     mockWatchMusicFolders.mockResolvedValue(() => undefined);
+    mockSyncLibraryChanges.mockResolvedValue({
+      library,
+      scannedFiles: 0,
+      addedFiles: 0,
+      updatedFiles: 0,
+      removedFiles: 0,
+      unreadableEntries: 0,
+      unreadableAudioFiles: 0,
+    });
     mockAudioEngine.load.mockResolvedValue(undefined);
     mockAudioEngine.resume.mockResolvedValue(undefined);
     mockAudioEngine.setCallbacks.mockImplementation((callbacks: AudioCallbacks) => {
@@ -244,9 +255,116 @@ describe("usePlayerApp", () => {
     });
   });
 
+  it("does not rescan the library on window focus or visibility changes", async () => {
+    const { usePlayerApp } = await import("./usePlayerApp");
+    const container = document.createElement("div");
+    const root = ReactDOM.createRoot(container);
+
+    function Probe() {
+      const state = usePlayerApp();
+      return <div>{state.error ?? ""}</div>;
+    }
+
+    await act(async () => {
+      root.render(<Probe />);
+      await flushEffects();
+    });
+
+    await act(async () => {
+      window.dispatchEvent(new Event("focus"));
+      document.dispatchEvent(new Event("visibilitychange"));
+      await flushEffects();
+    });
+
+    expect(mockScanLibrary).not.toHaveBeenCalled();
+    expect(mockSyncLibraryChanges).not.toHaveBeenCalled();
+
+    await act(async () => {
+      root.unmount();
+      await flushEffects();
+    });
+  });
+
+  it("does not rerender the app hook when playback progress ticks update", async () => {
+    const { usePlayerApp } = await import("./usePlayerApp");
+    const container = document.createElement("div");
+    const root = ReactDOM.createRoot(container);
+    let renderCount = 0;
+
+    function Probe() {
+      renderCount += 1;
+      usePlayerApp();
+      return <div />;
+    }
+
+    await act(async () => {
+      root.render(<Probe />);
+      await flushEffects();
+    });
+
+    const rendersAfterStartup = renderCount;
+
+    await act(async () => {
+      audioCallbacks.onTimeUpdate?.(24, 111);
+      await flushEffects();
+    });
+
+    expect(renderCount).toBe(rendersAfterStartup);
+
+    await act(async () => {
+      root.unmount();
+      await flushEffects();
+    });
+  });
+
+  it("batches watcher updates into incremental syncs instead of full rescans", async () => {
+    vi.useFakeTimers();
+
+    let watchCallback: ((paths: string[]) => void) | undefined;
+    mockWatchMusicFolders.mockImplementationOnce(async (_folders, onChange) => {
+      watchCallback = onChange;
+      return () => undefined;
+    });
+
+    const { usePlayerApp } = await import("./usePlayerApp");
+    const container = document.createElement("div");
+    const root = ReactDOM.createRoot(container);
+
+    function Probe() {
+      const state = usePlayerApp();
+      return <div>{state.error ?? ""}</div>;
+    }
+
+    await act(async () => {
+      root.render(<Probe />);
+      await flushEffects();
+    });
+
+    await act(async () => {
+      watchCallback?.(["/music/berrymane/eyes-red/02.flac"]);
+      watchCallback?.(["/music/berrymane/eyes-red/cover.jpg"]);
+      vi.advanceTimersByTime(901);
+      await flushEffects();
+    });
+
+    expect(mockSyncLibraryChanges).toHaveBeenCalledTimes(1);
+    expect(mockSyncLibraryChanges).toHaveBeenCalledWith([
+      "/music/berrymane/eyes-red/02.flac",
+      "/music/berrymane/eyes-red/cover.jpg",
+    ]);
+    expect(mockScanLibrary).not.toHaveBeenCalled();
+
+    await act(async () => {
+      root.unmount();
+      await flushEffects();
+    });
+
+    vi.useRealTimers();
+  });
+
   it("surfaces attempted playback strategies when resume fails", async () => {
     mockAudioEngine.resume.mockRejectedValueOnce(
-      new Error('Playback could not start for "Eyes Red" after trying decoded-wav, direct-file, blob. decoder failed'),
+      new Error('Playback could not start for "Eyes Red" after trying native-file, direct-file, decoded-wav. decoder failed'),
     );
 
     const { usePlayerApp } = await import("./usePlayerApp");
@@ -276,7 +394,9 @@ describe("usePlayerApp", () => {
       await flushEffects();
     });
 
-    expect((latestState as UsePlayerAppState).error).toContain('after trying decoded-wav, direct-file, blob');
+    expect((latestState as UsePlayerAppState).error).toContain(
+      "after trying native-file, direct-file, decoded-wav",
+    );
 
     await act(async () => {
       root.unmount();

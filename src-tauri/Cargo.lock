@@ -481,6 +481,8 @@ dependencies = [
 name = "darktone-player"
 version = "0.1.0"
 dependencies = [
+ "http-range",
+ "percent-encoding",
  "serde",
  "serde_json",
  "symphonia",

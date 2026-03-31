@@ -47,6 +47,16 @@ export interface LibraryScanResult {
   unreadableAudioFiles: number;
 }
 
+export interface LibrarySyncResult {
+  library: LibraryData;
+  scannedFiles: number;
+  addedFiles: number;
+  updatedFiles: number;
+  removedFiles: number;
+  unreadableEntries: number;
+  unreadableAudioFiles: number;
+}
+
 export type LibraryScanPhase = "discovering" | "scanning";
 
 export interface LibraryScanProgress {
