@@ -302,7 +302,7 @@ describe("AudioEngine", () => {
     const engine = new AudioEngine();
 
     await engine.load(flacTrack, false);
-    const mediaElement = engine.getMediaElement() as FakeAudio;
+    const mediaElement = engine.getMediaElement() as unknown as FakeAudio;
     mediaElement.currentTime = 42;
 
     engine.reset();

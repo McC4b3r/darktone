@@ -3,6 +3,10 @@ import ReactDOM from "react-dom/client";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Album, ArtistGroup, PlaybackState, Track } from "./lib/types";
 
+type ActEnvironmentGlobal = typeof globalThis & {
+  IS_REACT_ACT_ENVIRONMENT?: boolean;
+};
+
 const mockListen = vi.fn().mockResolvedValue(() => undefined);
 const mockUsePlayerApp = vi.fn();
 
@@ -194,7 +198,7 @@ function makePlayerState(overrides: Partial<ReturnType<typeof mockUsePlayerApp>>
 describe("App", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+    (globalThis as ActEnvironmentGlobal).IS_REACT_ACT_ENVIRONMENT = true;
     window.matchMedia = vi.fn().mockImplementation(() => ({
       matches: false,
       media: "",

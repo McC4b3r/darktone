@@ -41,7 +41,6 @@ export default function App() {
     scanProgress,
     artists,
     visibleAlbums,
-    selectedArtist,
     focusedArtist,
     selectedAlbum,
     currentAlbum,

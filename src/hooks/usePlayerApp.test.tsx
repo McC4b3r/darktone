@@ -1,8 +1,19 @@
 import { act, useEffect } from "react";
 import ReactDOM from "react-dom/client";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { AppSettings, LibraryData } from "../lib/types";
+import type { AppSettings, LibraryData, PlaybackState, Track } from "../lib/types";
 import type { AudioCallbacks } from "../lib/audio";
+
+type ActEnvironmentGlobal = typeof globalThis & {
+  IS_REACT_ACT_ENVIRONMENT?: boolean;
+};
+
+type UsePlayerAppState = {
+  error: string | null;
+  currentTrack: Track | null;
+  playback: PlaybackState;
+  togglePlay: () => Promise<void>;
+};
 
 const mockListen = vi.fn();
 const mockLoadSettings = vi.fn<[], Promise<AppSettings>>();
@@ -82,7 +93,7 @@ describe("usePlayerApp", () => {
   beforeEach(() => {
     vi.resetModules();
     vi.clearAllMocks();
-    globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+    (globalThis as ActEnvironmentGlobal).IS_REACT_ACT_ENVIRONMENT = true;
 
     mockListen.mockResolvedValue(() => undefined);
     mockLoadSettings.mockResolvedValue(settings);
@@ -98,7 +109,7 @@ describe("usePlayerApp", () => {
 
   it("restores the current track on startup without loading audio or surfacing an error", async () => {
     const { usePlayerApp } = await import("./usePlayerApp");
-    let latestState: ReturnType<typeof usePlayerApp> | null = null;
+    let latestState: UsePlayerAppState | null = null;
     const container = document.createElement("div");
     const root = ReactDOM.createRoot(container);
 
@@ -115,15 +126,20 @@ describe("usePlayerApp", () => {
       await flushEffects();
     });
 
+    if (!latestState) {
+      throw new Error("Expected hook state to be available.");
+    }
+    const state = latestState as UsePlayerAppState;
+
     expect(mockAudioEngine.reset).toHaveBeenCalledTimes(1);
     expect(mockAudioEngine.load).not.toHaveBeenCalled();
-    expect(latestState?.error).toBeNull();
-    expect(latestState?.currentTrack?.id).toBe(track.id);
-    expect(latestState?.playback.currentTrackId).toBe(track.id);
-    expect(latestState?.playback.isPlaying).toBe(false);
+    expect(state.error).toBeNull();
+    expect(state.currentTrack?.id).toBe(track.id);
+    expect(state.playback.currentTrackId).toBe(track.id);
+    expect(state.playback.isPlaying).toBe(false);
 
     await act(async () => {
-      await latestState?.togglePlay();
+      await state.togglePlay();
       await flushEffects();
     });
 
@@ -139,7 +155,7 @@ describe("usePlayerApp", () => {
 
   it("resumes the paused current track instead of reloading it", async () => {
     const { usePlayerApp } = await import("./usePlayerApp");
-    let latestState: ReturnType<typeof usePlayerApp> | null = null;
+    let latestState: UsePlayerAppState | null = null;
     const container = document.createElement("div");
     const root = ReactDOM.createRoot(container);
 
@@ -156,8 +172,13 @@ describe("usePlayerApp", () => {
       await flushEffects();
     });
 
+    if (!latestState) {
+      throw new Error("Expected hook state to be available.");
+    }
+    const state = latestState as UsePlayerAppState;
+
     await act(async () => {
-      await latestState?.togglePlay();
+      await state.togglePlay();
       audioCallbacks.onPlayStateChange?.(true);
       await flushEffects();
     });
@@ -167,7 +188,7 @@ describe("usePlayerApp", () => {
     await act(async () => {
       mockAudioEngine.pause.mockClear();
       mockAudioEngine.resume.mockClear();
-      latestState?.togglePlay();
+      state.togglePlay();
       audioCallbacks.onPlayStateChange?.(false);
       await flushEffects();
     });
@@ -175,7 +196,7 @@ describe("usePlayerApp", () => {
     expect(mockAudioEngine.pause).toHaveBeenCalledTimes(1);
 
     await act(async () => {
-      latestState?.togglePlay();
+      state.togglePlay();
       audioCallbacks.onPlayStateChange?.(true);
       await flushEffects();
     });
@@ -193,7 +214,7 @@ describe("usePlayerApp", () => {
     mockWatchMusicFolders.mockRejectedValueOnce(new Error("watch unavailable"));
 
     const { usePlayerApp } = await import("./usePlayerApp");
-    let latestState: ReturnType<typeof usePlayerApp> | null = null;
+    let latestState: UsePlayerAppState | null = null;
     const container = document.createElement("div");
     const root = ReactDOM.createRoot(container);
 
@@ -210,7 +231,12 @@ describe("usePlayerApp", () => {
       await flushEffects();
     });
 
-    expect(latestState?.error).toBeNull();
+    if (!latestState) {
+      throw new Error("Expected hook state to be available.");
+    }
+    const state = latestState as UsePlayerAppState;
+
+    expect(state.error).toBeNull();
     expect(mockAudioEngine.load).not.toHaveBeenCalled();
 
     await act(async () => {
