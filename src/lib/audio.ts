@@ -597,14 +597,6 @@ export class AudioEngine {
     await Promise.allSettled(pending);
   }
 
-  private isActiveGeneration(generation: number, sessionId?: number) {
-    return Boolean(
-      this.activeSession &&
-        this.activeSession.generation === generation &&
-        (sessionId === undefined || this.activeSession.sessionId === sessionId),
-    );
-  }
-
   private isActiveOperation(generation: number, sessionId: number, operationToken: number) {
     return Boolean(
       this.activeSession &&
