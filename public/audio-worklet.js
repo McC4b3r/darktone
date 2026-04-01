@@ -1,61 +1,27 @@
-declare abstract class AudioWorkletProcessor {
-  readonly port: MessagePort;
-
-  constructor(options?: unknown);
-
-  abstract process(inputs: Float32Array[][], outputs: Float32Array[][]): boolean;
-}
-
-declare function registerProcessor(
-  name: string,
-  processorCtor: new (options?: unknown) => AudioWorkletProcessor,
-): void;
-
-type ResetMessage = {
-  type: "reset";
-  generation: number;
-  playedFrames: number;
-};
-
-type AppendMessage = {
-  type: "append";
-  generation: number;
-  frames: number;
-  channelCount: number;
-  endOfStream: boolean;
-  samples: Float32Array;
-};
-
-type WorkletMessage = ResetMessage | AppendMessage;
-
-type Chunk = {
-  data: Float32Array;
-  frames: number;
-  channelCount: number;
-  index: number;
-};
+// This file is intentionally plain JavaScript so packaged desktop builds
+// always ship a loadable AudioWorklet module instead of a raw TypeScript asset.
 
 const LOW_WATER_FRAMES = 16_384;
 const PROGRESS_INTERVAL_FRAMES = 2_048;
 
 class DarktonePcmPlayerProcessor extends AudioWorkletProcessor {
-  private generation = 0;
-  private playedFrames = 0;
-  private bufferedFrames = 0;
-  private endOfStream = false;
-  private requestedData = false;
-  private sentEnded = false;
-  private framesSinceProgress = 0;
-  private chunks: Chunk[] = [];
+  generation = 0;
+  playedFrames = 0;
+  bufferedFrames = 0;
+  endOfStream = false;
+  requestedData = false;
+  sentEnded = false;
+  framesSinceProgress = 0;
+  chunks = [];
 
   constructor() {
     super();
-    this.port.onmessage = (event: MessageEvent<WorkletMessage>) => {
+    this.port.onmessage = (event) => {
       this.handleMessage(event.data);
     };
   }
 
-  process(_inputs: Float32Array[][], outputs: Float32Array[][]) {
+  process(_inputs, outputs) {
     const output = outputs[0];
     if (!output || output.length === 0) {
       return true;
@@ -97,7 +63,7 @@ class DarktonePcmPlayerProcessor extends AudioWorkletProcessor {
     return true;
   }
 
-  private handleMessage(message: WorkletMessage) {
+  handleMessage(message) {
     if (message.type === "reset") {
       this.generation = message.generation;
       this.playedFrames = Math.max(0, message.playedFrames);
@@ -130,7 +96,7 @@ class DarktonePcmPlayerProcessor extends AudioWorkletProcessor {
     });
   }
 
-  private emitProgress() {
+  emitProgress() {
     this.framesSinceProgress = 0;
     this.port.postMessage({
       type: "progress",
@@ -140,7 +106,7 @@ class DarktonePcmPlayerProcessor extends AudioWorkletProcessor {
     });
   }
 
-  private writeNextFrame(output: Float32Array[], frameIndex: number) {
+  writeNextFrame(output, frameIndex) {
     const chunk = this.chunks[0];
     if (!chunk) {
       return false;

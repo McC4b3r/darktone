@@ -177,10 +177,29 @@ describe("AudioEngine", () => {
     expect(mockReadPlaybackFrames).toHaveBeenCalledTimes(3);
     expect(FakeAudioContext.instances[0]?.resume).not.toHaveBeenCalled();
     expect((FakeAudioContext.instances[0]?.audioWorklet.addModule as ReturnType<typeof vi.fn>)).toHaveBeenCalledTimes(1);
+    expect(
+      new URL(
+        (FakeAudioContext.instances[0]?.audioWorklet.addModule as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as string,
+      ).pathname,
+    ).toBe("/audio-worklet.js");
 
     const messages = latestWorkletPort().sentMessages as Array<{ type: string }>;
     expect(messages[0]?.type).toBe("reset");
     expect(messages.filter((message) => message.type === "append")).toHaveLength(2);
+  });
+
+  it("includes the shipped worklet URL in the playback error when the module fails to load", async () => {
+    const { AudioEngine } = await import("./audio");
+    const engine = new AudioEngine();
+    const audioContext = engine.getAudioContext() as unknown as FakeAudioContext;
+    (
+      audioContext.audioWorklet.addModule as ReturnType<typeof vi.fn>
+    ).mockRejectedValueOnce(new Error("Unable to load a worklet's module"));
+
+    await expect(engine.load(track, false)).rejects.toThrow(
+      /Unable to load the playback worklet from .*\/audio-worklet\.js\. Unable to load a worklet's module/u,
+    );
+    expect(mockOpenPlaybackSession).not.toHaveBeenCalled();
   });
 
   it("reports progress from worklet messages and keeps the analyzer graph alive", async () => {

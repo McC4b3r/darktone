@@ -69,6 +69,7 @@ type EngineSession = {
 };
 
 const PLAYBACK_DEBUG_STORAGE_KEY = "darktone:debug-playback";
+const PLAYBACK_WORKLET_PATH = "/audio-worklet.js";
 const OUTPUT_CHANNEL_COUNT = 2;
 const READ_CHUNK_FRAMES = 16_384;
 const STARTUP_BUFFER_FRAMES = 32_768;
@@ -97,6 +98,10 @@ function logPlaybackDebug(message: string, details?: Record<string, unknown>) {
 
 function getAudioContextConstructor() {
   return window.AudioContext ?? (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+}
+
+function resolvePlaybackWorkletUrl() {
+  return new URL(PLAYBACK_WORKLET_PATH, window.location.href).href;
 }
 
 export class AudioEngine {
@@ -183,12 +188,28 @@ export class AudioEngine {
 
   private async createWorkletNode() {
     const audioContext = this.getAudioContext();
+    const workletUrl = resolvePlaybackWorkletUrl();
 
     if (!("audioWorklet" in audioContext) || typeof AudioWorkletNode === "undefined") {
       throw new Error("AudioWorklet is not available in this desktop runtime.");
     }
 
-    await audioContext.audioWorklet.addModule(new URL("./audio-worklet.ts", import.meta.url).href);
+    logPlaybackDebug("loading playback worklet", {
+      workletUrl,
+    });
+
+    try {
+      await audioContext.audioWorklet.addModule(workletUrl);
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : `${error}`;
+
+      logPlaybackDebug("playback worklet load failed", {
+        workletUrl,
+        error: reason,
+      });
+
+      throw new Error(`Unable to load the playback worklet from ${workletUrl}. ${reason}`);
+    }
 
     const node = new AudioWorkletNode(audioContext, "darktone-pcm-player", {
       numberOfInputs: 0,
