@@ -1,358 +1,319 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { AudioCallbacks } from "./audio";
 import type { Track } from "./types";
 
-const mockPrepareDecodedAudioForPlayback = vi.fn<[string], Promise<string>>();
-const mockReadPreparedPlaybackAudioBytes = vi.fn<[string], Promise<number[]>>();
-const mockConvertFileSrc = vi.fn(
-  (path: string, protocol = "asset") => `http://${protocol}.localhost/${encodeURIComponent(path)}`,
-);
-let blobUrlCounter = 0;
-const createObjectURL = vi.fn((blob: Blob) => `blob:${blob.type}:${blobUrlCounter++}`);
-const revokeObjectURL = vi.fn();
+const mockOpenPlaybackSession = vi.fn();
+const mockReadPlaybackFrames = vi.fn();
+const mockSeekPlaybackSession = vi.fn();
+const mockClosePlaybackSession = vi.fn();
 
 vi.mock("./tauri", () => ({
-  prepareDecodedAudioForPlayback: (path: string) => mockPrepareDecodedAudioForPlayback(path),
-  readPreparedPlaybackAudioBytes: (path: string) => mockReadPreparedPlaybackAudioBytes(path),
+  openPlaybackSession: (...args: unknown[]) => mockOpenPlaybackSession(...args),
+  readPlaybackFrames: (...args: unknown[]) => mockReadPlaybackFrames(...args),
+  seekPlaybackSession: (...args: unknown[]) => mockSeekPlaybackSession(...args),
+  closePlaybackSession: (...args: unknown[]) => mockClosePlaybackSession(...args),
 }));
 
-vi.mock("@tauri-apps/api/core", () => ({
-  convertFileSrc: (path: string, protocol?: string) => mockConvertFileSrc(path, protocol),
-}));
+class FakeMessagePort {
+  onmessage: ((event: MessageEvent) => void) | null = null;
+  sentMessages: unknown[] = [];
 
-type Listener = () => void;
-
-class FakeAudio {
-  static readonly HAVE_NOTHING = 0;
-  static readonly HAVE_METADATA = 1;
-
-  preload = "metadata";
-  currentTime = 0;
-  duration = 180;
-  volume = 1;
-  muted = false;
-  paused = true;
-  readyState = FakeAudio.HAVE_NOTHING;
-  src = "";
-  currentSrc = "";
-  error: { code: number; message: string } | null = null;
-  private listeners = new Map<string, Set<Listener>>();
-  static failures = new Map<string, { code: number; message: string }>();
-
-  addEventListener(type: string, listener: Listener) {
-    const existing = this.listeners.get(type) ?? new Set<Listener>();
-    existing.add(listener);
-    this.listeners.set(type, existing);
+  postMessage(message: unknown) {
+    this.sentMessages.push(message);
   }
 
-  removeEventListener(type: string, listener: Listener) {
-    this.listeners.get(type)?.delete(listener);
+  emit(data: unknown) {
+    this.onmessage?.({ data } as MessageEvent);
   }
+}
 
-  pause() {
-    this.paused = true;
-    this.dispatch("pause");
+class FakeGainNode {
+  gain = { value: 1 };
+
+  connect() {
+    return undefined;
   }
+}
 
-  async play() {
-    this.paused = false;
-    this.dispatch("play");
-  }
-
-  load() {
-    this.currentSrc = this.src;
-
-    const failure = FakeAudio.failures.get(this.src);
-    if (failure) {
-      this.readyState = FakeAudio.HAVE_NOTHING;
-      this.error = failure;
-      queueMicrotask(() => {
-        this.dispatch("error");
-      });
-      return;
-    }
-
-    if (this.src.endsWith(".flac")) {
-      this.readyState = FakeAudio.HAVE_NOTHING;
-      this.error = {
-        code: 4,
-        message: "PipelineStatus::DEMUXER_ERROR_COULD_NOT_OPEN: FFmpegDemuxer: open context failed",
-      };
-      queueMicrotask(() => {
-        this.dispatch("error");
-      });
-      return;
-    }
-
-    this.readyState = FakeAudio.HAVE_METADATA;
-    this.error = null;
-    queueMicrotask(() => {
-      this.dispatch("loadedmetadata");
-      this.dispatch("canplay");
-    });
-  }
-
-  removeAttribute(name: string) {
-    if (name === "src") {
-      this.src = "";
-      this.currentSrc = "";
-    }
-  }
-
-  private dispatch(type: string) {
-    for (const listener of this.listeners.get(type) ?? []) {
-      listener();
-    }
-  }
+class FakeAudioWorklet {
+  addModule = vi.fn(async () => undefined);
 }
 
 class FakeAudioContext {
-  state: "running" | "suspended" = "running";
+  static instances: FakeAudioContext[] = [];
 
-  createMediaElementSource() {
-    return {
-      connect() {
-        return undefined;
-      },
-    };
+  sampleRate = 48_000;
+  state: "running" | "suspended" = "suspended";
+  audioWorklet = new FakeAudioWorklet();
+  destination = {};
+
+  constructor() {
+    FakeAudioContext.instances.push(this);
   }
 
   createGain() {
-    return {
-      connect() {
-        return undefined;
-      },
-    };
+    return new FakeGainNode();
   }
 
-  resume() {
+  resume = vi.fn(async () => {
     this.state = "running";
-    return Promise.resolve();
-  }
+  });
 
-  get destination() {
-    return {};
+  suspend = vi.fn(async () => {
+    this.state = "suspended";
+  });
+}
+
+class FakeAudioWorkletNode {
+  static instances: FakeAudioWorkletNode[] = [];
+
+  readonly port = new FakeMessagePort();
+  readonly connect = vi.fn();
+
+  constructor(
+    _context: AudioContext,
+    _name: string,
+    _options?: AudioWorkletNodeOptions,
+  ) {
+    FakeAudioWorkletNode.instances.push(this);
   }
 }
 
-const flacTrack: Track = {
-  id: "flac-track",
-  path: "C:/music/problematic.flac",
+const track: Track = {
+  id: "track-1",
+  path: "/music/artist/album/song.flac",
   artPath: null,
-  filename: "problematic.flac",
-  title: "Problematic",
+  filename: "song.flac",
+  title: "Song",
   artist: "Artist",
   album: "Album",
-  releaseYear: 2004,
+  releaseYear: 2024,
   trackNumber: 1,
   durationMs: 180000,
   format: "flac",
   modifiedAt: 1,
 };
 
-const mp3Track: Track = {
-  ...flacTrack,
-  id: "mp3-track",
-  path: "C:/music/working.mp3",
-  filename: "working.mp3",
+const secondTrack: Track = {
+  ...track,
+  id: "track-2",
+  path: "/music/artist/album/song-2.mp3",
+  filename: "song-2.mp3",
+  title: "Song 2",
   format: "mp3",
 };
 
-const wavTrack: Track = {
-  ...flacTrack,
-  id: "wav-track",
-  path: "C:/music/clean.wav",
-  filename: "clean.wav",
-  format: "wav",
-};
+function playbackMetadata(sessionId: number) {
+  return {
+    sessionId,
+    sampleRate: 48_000,
+    channelCount: 2,
+    sourceSampleRate: 44_100,
+    sourceChannelCount: 2,
+    durationSeconds: 180,
+    currentTimeSeconds: 0,
+  };
+}
 
-const PACKAGED_WINDOWS = {
-  isDev: false,
-  isWindows: true,
-} as const;
+function playbackChunk(
+  sessionId: number,
+  frames: number,
+  options?: {
+    endOfStream?: boolean;
+    currentTimeSeconds?: number;
+    durationSeconds?: number;
+  },
+) {
+  return {
+    sessionId,
+    sampleRate: 48_000,
+    channelCount: 2,
+    frames,
+    samples: Array.from({ length: frames * 2 }, (_, index) => Math.sin(index / 16)),
+    endOfStream: options?.endOfStream ?? false,
+    currentTimeSeconds: options?.currentTimeSeconds ?? frames / 48_000,
+    durationSeconds: options?.durationSeconds ?? 180,
+  };
+}
 
-const DEV_WINDOWS = {
-  isDev: true,
-  isWindows: true,
-} as const;
-
-const PACKAGED_NON_WINDOWS = {
-  isDev: false,
-  isWindows: false,
-} as const;
+function latestWorkletPort() {
+  const instance = FakeAudioWorkletNode.instances[FakeAudioWorkletNode.instances.length - 1];
+  if (!instance) {
+    throw new Error("Expected a worklet node instance.");
+  }
+  return instance.port;
+}
 
 beforeEach(() => {
   vi.resetModules();
-  mockPrepareDecodedAudioForPlayback.mockReset();
-  mockReadPreparedPlaybackAudioBytes.mockReset();
-  mockConvertFileSrc.mockClear();
-  createObjectURL.mockClear();
-  revokeObjectURL.mockClear();
-  FakeAudio.failures.clear();
-  blobUrlCounter = 0;
+  vi.clearAllMocks();
+  FakeAudioContext.instances = [];
+  FakeAudioWorkletNode.instances = [];
 
-  vi.stubGlobal("Audio", FakeAudio);
+  mockOpenPlaybackSession.mockReset();
+  mockReadPlaybackFrames.mockReset();
+  mockSeekPlaybackSession.mockReset();
+  mockClosePlaybackSession.mockReset();
+  mockClosePlaybackSession.mockResolvedValue(undefined);
+
   vi.stubGlobal("AudioContext", FakeAudioContext);
-  vi.stubGlobal("MediaError", {
-    MEDIA_ERR_ABORTED: 1,
-    MEDIA_ERR_NETWORK: 2,
-    MEDIA_ERR_DECODE: 3,
-    MEDIA_ERR_SRC_NOT_SUPPORTED: 4,
-  });
-  Object.defineProperty(URL, "createObjectURL", {
-    configurable: true,
-    writable: true,
-    value: createObjectURL,
-  });
-  Object.defineProperty(URL, "revokeObjectURL", {
-    configurable: true,
-    writable: true,
-    value: revokeObjectURL,
-  });
+  vi.stubGlobal("AudioWorkletNode", FakeAudioWorkletNode);
 });
 
 describe("AudioEngine", () => {
-  it.each([mp3Track, wavTrack, flacTrack])(
-    "chooses decoded WAV first for packaged Windows %s tracks",
-    async (track) => {
-      const { getTrackLoadStrategyOrder } = await import("./audio");
-
-      expect(getTrackLoadStrategyOrder(track, PACKAGED_WINDOWS)).toEqual([
-        "decoded-wav",
-        "native-file",
-        "direct-file",
-      ]);
-    },
-  );
-
-  it("keeps the direct-first strategy outside packaged Windows builds", async () => {
-    const { getTrackLoadStrategyOrder } = await import("./audio");
-
-    expect(getTrackLoadStrategyOrder(mp3Track, DEV_WINDOWS)).toEqual([
-      "direct-file",
-      "native-file",
-      "decoded-wav",
-    ]);
-
-    expect(getTrackLoadStrategyOrder(flacTrack, PACKAGED_NON_WINDOWS)).toEqual([
-      "direct-file",
-      "native-file",
-      "decoded-wav",
-    ]);
-  });
-
-  it("uses Blob-backed decoded audio as the primary packaged Windows source", async () => {
-    mockPrepareDecodedAudioForPlayback.mockResolvedValue("C:/app/playback/working.wav");
-    mockReadPreparedPlaybackAudioBytes.mockResolvedValue([10, 20, 30, 40]);
+  it("loads a startup buffer through playback sessions before beginning playback", async () => {
+    mockOpenPlaybackSession.mockResolvedValue(playbackMetadata(11));
+    mockReadPlaybackFrames
+      .mockResolvedValueOnce(playbackChunk(11, 16_384))
+      .mockResolvedValueOnce(playbackChunk(11, 16_384))
+      .mockResolvedValue(playbackChunk(11, 16_384, { endOfStream: true }));
 
     const { AudioEngine } = await import("./audio");
-    const engine = new AudioEngine(PACKAGED_WINDOWS);
+    const engine = new AudioEngine();
 
-    await engine.load(mp3Track, false);
+    await engine.load(track, false);
 
-    expect(mockPrepareDecodedAudioForPlayback).toHaveBeenCalledWith(mp3Track.path);
-    expect(mockReadPreparedPlaybackAudioBytes).toHaveBeenCalledWith("C:/app/playback/working.wav");
-    expect(mockConvertFileSrc).not.toHaveBeenCalled();
-    expect(createObjectURL).toHaveBeenCalledTimes(1);
-    expect((createObjectURL.mock.calls[0]?.[0] as Blob).type).toBe("audio/wav");
+    expect(mockOpenPlaybackSession).toHaveBeenCalledWith(track.path, 48_000, 2);
+    expect(mockReadPlaybackFrames).toHaveBeenCalledTimes(3);
+    expect(FakeAudioContext.instances[0]?.resume).not.toHaveBeenCalled();
+    expect((FakeAudioContext.instances[0]?.audioWorklet.addModule as ReturnType<typeof vi.fn>)).toHaveBeenCalledTimes(1);
+
+    const messages = latestWorkletPort().sentMessages as Array<{ type: string }>;
+    expect(messages[0]?.type).toBe("reset");
+    expect(messages.filter((message) => message.type === "append")).toHaveLength(2);
   });
 
-  it("does not use fallbacks for mp3 when the direct source succeeds outside packaged Windows", async () => {
+  it("reports progress from worklet messages and keeps the analyzer graph alive", async () => {
+    mockOpenPlaybackSession.mockResolvedValue(playbackMetadata(21));
+    mockReadPlaybackFrames
+      .mockResolvedValueOnce(playbackChunk(21, 16_384))
+      .mockResolvedValueOnce(playbackChunk(21, 16_384))
+      .mockResolvedValue(playbackChunk(21, 8_192));
+
+    const callbacks: AudioCallbacks = {
+      onTimeUpdate: vi.fn(),
+      onPlayStateChange: vi.fn(),
+      onStatusChange: vi.fn(),
+    };
+
     const { AudioEngine } = await import("./audio");
-    const engine = new AudioEngine(DEV_WINDOWS);
+    const engine = new AudioEngine();
+    engine.setCallbacks(callbacks);
 
-    await engine.load(mp3Track, false);
+    const audioContext = engine.getAudioContext();
+    const analyzerInput = engine.getAnalyzerInputNode();
 
-    expect(mockConvertFileSrc).toHaveBeenCalledWith(mp3Track.path, undefined);
-    expect(mockPrepareDecodedAudioForPlayback).not.toHaveBeenCalled();
-    expect(mockReadPreparedPlaybackAudioBytes).not.toHaveBeenCalled();
-  });
+    await engine.load(track, true);
 
-  it("falls back to the native-file source when packaged Windows decoded playback fails", async () => {
-    mockPrepareDecodedAudioForPlayback.mockResolvedValue("C:/app/playback/working.wav");
-    mockReadPreparedPlaybackAudioBytes.mockRejectedValue(new Error("read failed"));
+    expect(audioContext).toBeInstanceOf(FakeAudioContext);
+    expect(analyzerInput).toBeInstanceOf(FakeGainNode);
+    expect(callbacks.onPlayStateChange).toHaveBeenLastCalledWith(true);
 
-    const { AudioEngine } = await import("./audio");
-    const engine = new AudioEngine(PACKAGED_WINDOWS);
-
-    await engine.load(mp3Track, false);
-
-    expect(mockPrepareDecodedAudioForPlayback).toHaveBeenCalledWith(mp3Track.path);
-    expect(mockReadPreparedPlaybackAudioBytes).toHaveBeenCalledWith("C:/app/playback/working.wav");
-    expect(mockConvertFileSrc).toHaveBeenCalledTimes(1);
-    expect(mockConvertFileSrc).toHaveBeenNthCalledWith(1, mp3Track.path, "playback");
-  });
-
-  it("falls back to the direct-file source when packaged Windows decoded and native playback both fail", async () => {
-    mockPrepareDecodedAudioForPlayback.mockResolvedValue("C:/app/playback/working.wav");
-    mockReadPreparedPlaybackAudioBytes.mockRejectedValue(new Error("read failed"));
-    FakeAudio.failures.set(`http://playback.localhost/${encodeURIComponent(mp3Track.path)}`, {
-      code: 3,
-      message: "media decode error",
+    latestWorkletPort().emit({
+      type: "progress",
+      generation: 1,
+      playedFrames: 24_000,
+      bufferedFrames: 12_000,
     });
 
-    const { AudioEngine } = await import("./audio");
-    const engine = new AudioEngine(PACKAGED_WINDOWS);
-
-    await engine.load(mp3Track, false);
-
-    expect(mockConvertFileSrc).toHaveBeenNthCalledWith(1, mp3Track.path, "playback");
-    expect(mockConvertFileSrc).toHaveBeenNthCalledWith(2, mp3Track.path, undefined);
+    expect(callbacks.onTimeUpdate).toHaveBeenLastCalledWith(0.5, 180);
   });
 
-  it("revokes the previous Blob URL when packaged Windows decoded playback switches tracks", async () => {
-    mockPrepareDecodedAudioForPlayback.mockResolvedValue("C:/app/playback/working.wav");
-    mockReadPreparedPlaybackAudioBytes.mockResolvedValue([10, 20, 30, 40]);
+  it("drops stale worklet events and closes the superseded playback session on track changes", async () => {
+    mockOpenPlaybackSession
+      .mockResolvedValueOnce(playbackMetadata(31))
+      .mockResolvedValueOnce(playbackMetadata(32));
+    mockReadPlaybackFrames
+      .mockResolvedValueOnce(playbackChunk(31, 16_384))
+      .mockResolvedValueOnce(playbackChunk(31, 16_384))
+      .mockResolvedValueOnce(playbackChunk(32, 16_384))
+      .mockResolvedValueOnce(playbackChunk(32, 16_384))
+      .mockResolvedValue(playbackChunk(32, 16_384));
+
+    const callbacks: AudioCallbacks = {
+      onTimeUpdate: vi.fn(),
+    };
 
     const { AudioEngine } = await import("./audio");
-    const engine = new AudioEngine(PACKAGED_WINDOWS);
+    const engine = new AudioEngine();
+    engine.setCallbacks(callbacks);
 
-    await engine.load(mp3Track, false);
-    mockPrepareDecodedAudioForPlayback.mockResolvedValue("C:/app/playback/clean.wav");
-    await engine.load(wavTrack, false);
+    await engine.load(track, false);
+    const firstPort = latestWorkletPort();
+    await engine.load(secondTrack, false);
 
-    expect(createObjectURL).toHaveBeenCalledTimes(2);
-    expect(revokeObjectURL).toHaveBeenCalledTimes(1);
-    expect(revokeObjectURL).toHaveBeenCalledWith("blob:audio/wav:0");
-  });
+    expect(mockClosePlaybackSession).toHaveBeenCalledWith(31);
 
-  it("reset clears the active source and revokes the packaged Windows Blob URL", async () => {
-    mockPrepareDecodedAudioForPlayback.mockResolvedValue("C:/app/playback/problematic.wav");
-    mockReadPreparedPlaybackAudioBytes.mockResolvedValue([10, 20, 30, 40]);
-
-    const { AudioEngine } = await import("./audio");
-    const engine = new AudioEngine(PACKAGED_WINDOWS);
-
-    await engine.load(flacTrack, false);
-    const mediaElement = engine.getMediaElement() as unknown as FakeAudio;
-    mediaElement.currentTime = 42;
-
-    engine.reset();
-
-    expect(revokeObjectURL).toHaveBeenCalledTimes(1);
-    expect(revokeObjectURL).toHaveBeenCalledWith("blob:audio/wav:0");
-    expect(mediaElement.src).toBe("");
-    expect(mediaElement.currentSrc).toBe("");
-    expect(mediaElement.currentTime).toBe(0);
-    expect((engine as unknown as { loadedTrackId: string | null }).loadedTrackId).toBeNull();
-    expect((engine as unknown as { loadingSource: boolean }).loadingSource).toBe(false);
-  });
-
-  it("reports the attempted packaged Windows playback strategies when every source fails", async () => {
-    mockPrepareDecodedAudioForPlayback.mockRejectedValue(new Error("decoder failed"));
-    FakeAudio.failures.set(`http://playback.localhost/${encodeURIComponent(mp3Track.path)}`, {
-      code: 2,
-      message: "network error while loading media",
-    });
-    FakeAudio.failures.set(`http://asset.localhost/${encodeURIComponent(mp3Track.path)}`, {
-      code: 3,
-      message: "media decode error",
+    firstPort.emit({
+      type: "progress",
+      generation: 1,
+      playedFrames: 48_000,
+      bufferedFrames: 4_096,
     });
 
-    const { AudioEngine } = await import("./audio");
-    const engine = new AudioEngine(PACKAGED_WINDOWS);
+    expect(callbacks.onTimeUpdate).not.toHaveBeenCalledWith(1, 180);
+  });
 
-    await expect(engine.load(mp3Track, false)).rejects.toThrow(
-      'Playback could not start for "Problematic" after trying decoded-wav, native-file, direct-file.',
-    );
+  it("seeks by resetting the worklet timeline and refilling a fresh startup buffer", async () => {
+    mockOpenPlaybackSession.mockResolvedValue(playbackMetadata(41));
+    mockReadPlaybackFrames
+      .mockResolvedValueOnce(playbackChunk(41, 16_384))
+      .mockResolvedValueOnce(playbackChunk(41, 16_384))
+      .mockResolvedValueOnce(playbackChunk(41, 16_384))
+      .mockResolvedValueOnce(playbackChunk(41, 16_384));
+    mockSeekPlaybackSession.mockResolvedValue({
+      sessionId: 41,
+      currentTimeSeconds: 30,
+      durationSeconds: 180,
+    });
+
+    const callbacks: AudioCallbacks = {
+      onTimeUpdate: vi.fn(),
+    };
+
+    const { AudioEngine } = await import("./audio");
+    const engine = new AudioEngine();
+    engine.setCallbacks(callbacks);
+
+    await engine.load(track, false);
+    latestWorkletPort().sentMessages.length = 0;
+
+    await engine.seek(30);
+
+    expect(mockSeekPlaybackSession).toHaveBeenCalledWith(41, 30);
+    expect(mockReadPlaybackFrames).toHaveBeenCalledTimes(5);
+    expect(callbacks.onTimeUpdate).toHaveBeenCalledWith(30, 180);
+
+    const resetMessage = (latestWorkletPort().sentMessages[0] ?? {}) as { type?: string; playedFrames?: number };
+    expect(resetMessage.type).toBe("reset");
+    expect(resetMessage.playedFrames).toBe(30 * 48_000);
+  });
+
+  it("surfaces background buffering failures through the async playback callbacks", async () => {
+    mockOpenPlaybackSession.mockResolvedValue(playbackMetadata(51));
+    mockReadPlaybackFrames
+      .mockResolvedValueOnce(playbackChunk(51, 16_384))
+      .mockResolvedValueOnce(playbackChunk(51, 16_384))
+      .mockRejectedValueOnce(new Error("decoder stalled"));
+
+    const callbacks: AudioCallbacks = {
+      onError: vi.fn(),
+      onPlayStateChange: vi.fn(),
+    };
+
+    const { AudioEngine } = await import("./audio");
+    const engine = new AudioEngine();
+    engine.setCallbacks(callbacks);
+
+    await engine.load(track, true);
+    await new Promise((resolve) => {
+      setTimeout(resolve, 0);
+    });
+    await new Promise((resolve) => {
+      setTimeout(resolve, 0);
+    });
+
+    expect(callbacks.onError).toHaveBeenCalledWith("decoder stalled");
+    expect(callbacks.onPlayStateChange).toHaveBeenLastCalledWith(false);
   });
 });

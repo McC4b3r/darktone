@@ -1,27 +1,78 @@
-import { convertFileSrc } from "@tauri-apps/api/core";
-import { prepareDecodedAudioForPlayback, readPreparedPlaybackAudioBytes } from "./tauri";
+import {
+  closePlaybackSession,
+  openPlaybackSession,
+  readPlaybackFrames,
+  seekPlaybackSession,
+} from "./tauri";
 import type { Track } from "./types";
+
+export type PlaybackStatus = "idle" | "buffering" | "ready" | "playing" | "paused" | "ended" | "error";
 
 export type AudioCallbacks = {
   onTimeUpdate?: (currentTime: number, duration: number) => void;
   onEnded?: () => void;
   onPlayStateChange?: (isPlaying: boolean) => void;
   onError?: (message: string) => void;
+  onStatusChange?: (status: PlaybackStatus) => void;
+};
+
+type WorkletResetMessage = {
+  type: "reset";
+  generation: number;
+  playedFrames: number;
+};
+
+type WorkletAppendMessage = {
+  type: "append";
+  generation: number;
+  frames: number;
+  channelCount: number;
+  endOfStream: boolean;
+  samples: Float32Array;
+};
+
+type WorkletMessage = WorkletResetMessage | WorkletAppendMessage;
+
+type WorkletNeedDataMessage = {
+  type: "need-data";
+  generation: number;
+  bufferedFrames: number;
+};
+
+type WorkletProgressMessage = {
+  type: "progress";
+  generation: number;
+  playedFrames: number;
+  bufferedFrames: number;
+};
+
+type WorkletEndedMessage = {
+  type: "ended";
+  generation: number;
+  playedFrames: number;
+};
+
+type WorkletEvent = WorkletNeedDataMessage | WorkletProgressMessage | WorkletEndedMessage;
+
+type EngineSession = {
+  generation: number;
+  sessionId: number;
+  trackId: string;
+  sampleRate: number;
+  channelCount: number;
+  duration: number;
+  currentTime: number;
+  bufferedFrames: number;
+  endOfStream: boolean;
+  readInFlight: boolean;
+  pumpPromise: Promise<void> | null;
 };
 
 const PLAYBACK_DEBUG_STORAGE_KEY = "darktone:debug-playback";
-const PLAYBACK_FILE_PROTOCOL = "playback";
-
-export type PlaybackSourceStrategy = "decoded-wav" | "direct-file" | "native-file";
-
-type PlaybackEnvironment = {
-  isDev: boolean;
-  isWindows: boolean;
-};
-
-function isPackagedWindowsPlayback(environment: PlaybackEnvironment) {
-  return !environment.isDev && environment.isWindows;
-}
+const OUTPUT_CHANNEL_COUNT = 2;
+const READ_CHUNK_FRAMES = 16_384;
+const STARTUP_BUFFER_FRAMES = 32_768;
+const HIGH_WATER_FRAMES = 65_536;
 
 function isPlaybackDebugEnabled() {
   if (import.meta.env.DEV) {
@@ -44,495 +95,543 @@ function logPlaybackDebug(message: string, details?: Record<string, unknown>) {
   console.info(`[playback] ${message}`, payload ?? "");
 }
 
-function detectPlaybackEnvironment(): PlaybackEnvironment {
-  const userAgent = typeof navigator === "undefined" ? "" : navigator.userAgent;
-
-  return {
-    isDev: Boolean(import.meta.env.DEV),
-    isWindows: /windows/i.test(userAgent),
-  };
-}
-
-export function getTrackLoadStrategyOrder(
-  _track: Track,
-  environment: PlaybackEnvironment = detectPlaybackEnvironment(),
-): PlaybackSourceStrategy[] {
-  if (isPackagedWindowsPlayback(environment)) {
-    return ["decoded-wav", "native-file", "direct-file"];
-  }
-
-  return ["direct-file", "native-file", "decoded-wav"];
+function getAudioContextConstructor() {
+  return window.AudioContext ?? (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
 }
 
 export class AudioEngine {
-  private audio: HTMLAudioElement;
   private callbacks: AudioCallbacks = {};
-  private readonly environment: PlaybackEnvironment;
-  private objectUrl: string | null = null;
   private loadedTrackId: string | null = null;
-  private loadingSource = false;
   private audioContext: AudioContext | null = null;
-  private sourceNode: MediaElementAudioSourceNode | null = null;
-  private outputNode: GainNode | null = null;
-
-  constructor(environment: PlaybackEnvironment = detectPlaybackEnvironment()) {
-    this.environment = environment;
-    this.audio = new Audio();
-    this.audio.preload = "metadata";
-
-    this.audio.addEventListener("timeupdate", () => {
-      this.callbacks.onTimeUpdate?.(this.audio.currentTime, this.audio.duration || 0);
-    });
-
-    this.audio.addEventListener("loadedmetadata", () => {
-      this.callbacks.onTimeUpdate?.(this.audio.currentTime, this.audio.duration || 0);
-    });
-
-    this.audio.addEventListener("ended", () => {
-      this.callbacks.onEnded?.();
-    });
-
-    this.audio.addEventListener("play", () => {
-      this.callbacks.onPlayStateChange?.(true);
-    });
-
-    this.audio.addEventListener("pause", () => {
-      this.callbacks.onPlayStateChange?.(false);
-    });
-
-    this.audio.addEventListener("error", () => {
-      if (this.loadingSource) {
-        return;
-      }
-
-      const message = this.describeMediaError();
-      this.callbacks.onError?.(message);
-    });
-  }
+  private analyzerInputNode: GainNode | null = null;
+  private masterGainNode: GainNode | null = null;
+  private workletNode: AudioWorkletNode | null = null;
+  private workletSetupPromise: Promise<void> | null = null;
+  private activeSession: EngineSession | null = null;
+  private generation = 0;
+  private volume = 1;
+  private muted = false;
+  private playState = false;
+  private status: PlaybackStatus = "idle";
+  private lastReportedTime = {
+    currentTime: Number.NaN,
+    duration: Number.NaN,
+  };
 
   setCallbacks(callbacks: AudioCallbacks) {
     this.callbacks = callbacks;
   }
 
-  getMediaElement() {
-    return this.audio;
-  }
-
-  hasSource() {
-    return Boolean(this.audio.currentSrc || this.audio.src);
-  }
-
-  private async waitForMetadata() {
-    if (this.audio.readyState >= HTMLMediaElement.HAVE_METADATA) {
-      return;
-    }
-
-    await new Promise<void>((resolve, reject) => {
-      const handleLoadedMetadata = () => {
-        cleanup();
-        resolve();
-      };
-      const handleError = () => {
-        cleanup();
-        reject(new Error(this.audio.error?.message || "Audio metadata failed to load."));
-      };
-      const cleanup = () => {
-        this.audio.removeEventListener("loadedmetadata", handleLoadedMetadata);
-        this.audio.removeEventListener("error", handleError);
-      };
-
-      this.audio.addEventListener("loadedmetadata", handleLoadedMetadata, { once: true });
-      this.audio.addEventListener("error", handleError, { once: true });
-    });
-  }
-
   getAudioContext() {
-    if (!this.audioContext) {
-      this.audioContext = new AudioContext();
-    }
-    return this.audioContext;
-  }
-
-  getSourceNode() {
-    if (!this.sourceNode) {
-      const audioContext = this.getAudioContext();
-      this.sourceNode = audioContext.createMediaElementSource(this.audio);
-      this.outputNode = audioContext.createGain();
-      this.sourceNode.connect(this.outputNode);
-      this.outputNode.connect(audioContext.destination);
-    }
-    return this.sourceNode;
+    this.ensureAudioGraphBase();
+    return this.audioContext!;
   }
 
   getAnalyzerInputNode() {
-    this.getSourceNode();
-    if (!this.outputNode) {
-      throw new Error("Audio output node is not initialized.");
-    }
-    return this.outputNode;
+    this.ensureAudioGraphBase();
+    return this.analyzerInputNode!;
   }
 
-  private revokeObjectUrl(url = this.objectUrl) {
-    if (!url) {
+  private ensureAudioGraphBase() {
+    if (this.audioContext && this.analyzerInputNode && this.masterGainNode) {
       return;
     }
 
-    URL.revokeObjectURL(url);
-
-    if (this.objectUrl === url) {
-      this.objectUrl = null;
-    }
-  }
-
-  private describeMediaError() {
-    const error = this.audio.error;
-    if (!error) {
-      return "Audio playback failed.";
+    const AudioContextConstructor = getAudioContextConstructor();
+    if (!AudioContextConstructor) {
+      throw new Error("Web Audio is not available in this environment.");
     }
 
-    const codeLabel =
-      error.code === MediaError.MEDIA_ERR_ABORTED
-        ? "media load aborted"
-        : error.code === MediaError.MEDIA_ERR_NETWORK
-          ? "network error while loading media"
-          : error.code === MediaError.MEDIA_ERR_DECODE
-            ? "media decode error"
-            : error.code === MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED
-              ? "no supported source was found"
-              : "unknown media error";
+    if (!this.audioContext) {
+      this.audioContext = new AudioContextConstructor({
+        latencyHint: "playback",
+      });
+    }
 
-    return error.message ? `${codeLabel}: ${error.message}` : codeLabel;
+    if (!this.analyzerInputNode) {
+      this.analyzerInputNode = this.audioContext.createGain();
+    }
+
+    if (!this.masterGainNode) {
+      this.masterGainNode = this.audioContext.createGain();
+      this.analyzerInputNode.connect(this.masterGainNode);
+      this.masterGainNode.connect(this.audioContext.destination);
+    }
+
+    this.applyOutputGain();
   }
 
-  private async waitForLoadResult() {
-    if (this.audio.readyState >= HTMLMediaElement.HAVE_METADATA) {
+  private async ensureWorkletNode() {
+    this.ensureAudioGraphBase();
+    if (this.workletNode) {
+      return this.workletNode;
+    }
+
+    if (!this.workletSetupPromise) {
+      this.workletSetupPromise = this.createWorkletNode().catch((error) => {
+        this.workletSetupPromise = null;
+        throw error;
+      });
+    }
+
+    await this.workletSetupPromise;
+    if (!this.workletNode) {
+      throw new Error("Playback worklet did not initialize.");
+    }
+    return this.workletNode;
+  }
+
+  private async createWorkletNode() {
+    const audioContext = this.getAudioContext();
+
+    if (!("audioWorklet" in audioContext) || typeof AudioWorkletNode === "undefined") {
+      throw new Error("AudioWorklet is not available in this desktop runtime.");
+    }
+
+    await audioContext.audioWorklet.addModule(new URL("./audio-worklet.ts", import.meta.url).href);
+
+    const node = new AudioWorkletNode(audioContext, "darktone-pcm-player", {
+      numberOfInputs: 0,
+      numberOfOutputs: 1,
+      outputChannelCount: [OUTPUT_CHANNEL_COUNT],
+    });
+    node.port.onmessage = (event: MessageEvent<WorkletEvent>) => {
+      this.handleWorkletEvent(event.data);
+    };
+    node.connect(this.getAnalyzerInputNode());
+    this.workletNode = node;
+  }
+
+  private handleWorkletEvent(event: WorkletEvent) {
+    const session = this.activeSession;
+    if (!session || event.generation !== session.generation) {
       return;
     }
 
-    await new Promise<void>((resolve, reject) => {
-      const handleLoadedMetadata = () => {
-        cleanup();
-        resolve();
-      };
-      const handleCanPlay = () => {
-        cleanup();
-        resolve();
-      };
-      const handleError = () => {
-        cleanup();
-        reject(new Error(this.describeMediaError()));
-      };
-      const cleanup = () => {
-        this.audio.removeEventListener("loadedmetadata", handleLoadedMetadata);
-        this.audio.removeEventListener("canplay", handleCanPlay);
-        this.audio.removeEventListener("error", handleError);
-      };
+    if (event.type === "need-data") {
+      session.bufferedFrames = event.bufferedFrames;
+      this.pumpSessionInBackground(session);
+      return;
+    }
 
-      this.audio.addEventListener("loadedmetadata", handleLoadedMetadata, { once: true });
-      this.audio.addEventListener("canplay", handleCanPlay, { once: true });
-      this.audio.addEventListener("error", handleError, { once: true });
+    if (event.type === "progress") {
+      session.bufferedFrames = event.bufferedFrames;
+      session.currentTime = event.playedFrames / session.sampleRate;
+      this.emitTimeUpdate(session.currentTime, session.duration);
+
+      if (!session.endOfStream && session.bufferedFrames < HIGH_WATER_FRAMES / 2) {
+        this.pumpSessionInBackground(session);
+      }
+      return;
+    }
+
+    session.currentTime = event.playedFrames / session.sampleRate;
+    session.bufferedFrames = 0;
+    this.emitTimeUpdate(session.duration || session.currentTime, session.duration);
+    this.setPlayState(false);
+    this.setStatus("ended");
+    void this.suspendAudioContext();
+    this.callbacks.onEnded?.();
+  }
+
+  private postToWorklet(message: WorkletMessage) {
+    if (!this.workletNode) {
+      return;
+    }
+
+    if (message.type === "append") {
+      this.workletNode.port.postMessage(message, [message.samples.buffer]);
+      return;
+    }
+
+    this.workletNode.port.postMessage(message);
+  }
+
+  private setStatus(status: PlaybackStatus) {
+    if (this.status === status) {
+      return;
+    }
+
+    this.status = status;
+    this.callbacks.onStatusChange?.(status);
+  }
+
+  private setPlayState(isPlaying: boolean) {
+    if (this.playState === isPlaying) {
+      return;
+    }
+
+    this.playState = isPlaying;
+    this.callbacks.onPlayStateChange?.(isPlaying);
+  }
+
+  private emitTimeUpdate(currentTime: number, duration: number) {
+    const safeCurrentTime = Number.isFinite(currentTime) ? Math.max(currentTime, 0) : 0;
+    const safeDuration = Number.isFinite(duration) ? Math.max(duration, 0) : 0;
+
+    if (
+      this.lastReportedTime.currentTime === safeCurrentTime &&
+      this.lastReportedTime.duration === safeDuration
+    ) {
+      return;
+    }
+
+    this.lastReportedTime = {
+      currentTime: safeCurrentTime,
+      duration: safeDuration,
+    };
+    this.callbacks.onTimeUpdate?.(safeCurrentTime, safeDuration);
+  }
+
+  private applyOutputGain() {
+    if (!this.masterGainNode) {
+      return;
+    }
+
+    this.masterGainNode.gain.value = this.muted ? 0 : this.volume;
+  }
+
+  private async resumeAudioContext() {
+    const audioContext = this.getAudioContext();
+    if (audioContext.state === "suspended") {
+      await audioContext.resume();
+    }
+  }
+
+  private async suspendAudioContext() {
+    if (!this.audioContext || this.audioContext.state !== "running") {
+      return;
+    }
+
+    await this.audioContext.suspend();
+  }
+
+  private async teardownSession(nextGeneration: number, resetLoadedTrack: boolean) {
+    const previousSession = this.activeSession;
+    this.activeSession = null;
+    if (resetLoadedTrack) {
+      this.loadedTrackId = null;
+    }
+
+    this.postToWorklet({
+      type: "reset",
+      generation: nextGeneration,
+      playedFrames: 0,
+    });
+
+    if (previousSession) {
+      logPlaybackDebug("closing playback session", {
+        sessionId: previousSession.sessionId,
+        trackId: previousSession.trackId,
+      });
+      void closePlaybackSession(previousSession.sessionId).catch((error) => {
+        console.warn("Could not close playback session.", error);
+      });
+    }
+  }
+
+  private resetWorklet(session: EngineSession, currentTime: number) {
+    this.postToWorklet({
+      type: "reset",
+      generation: session.generation,
+      playedFrames: Math.max(0, Math.round(currentTime * session.sampleRate)),
     });
   }
 
-  private async assignSource(src: string, objectUrl: string | null = null) {
-    const previousObjectUrl = this.objectUrl;
+  private async readNextChunk(session: EngineSession) {
+    if (session.readInFlight || session.endOfStream) {
+      return;
+    }
 
-    logPlaybackDebug("assigning source", {
-      src,
-      hadObjectUrl: Boolean(previousObjectUrl),
-      nextUsesObjectUrl: Boolean(objectUrl),
-      loadedTrackId: this.loadedTrackId,
+    session.readInFlight = true;
+
+    try {
+      const chunk = await readPlaybackFrames(session.sessionId, READ_CHUNK_FRAMES);
+      if (!this.isActiveGeneration(session.generation, session.sessionId)) {
+        return;
+      }
+
+      session.endOfStream = chunk.endOfStream;
+
+      if (chunk.frames > 0) {
+        const samples = Float32Array.from(chunk.samples);
+        session.bufferedFrames += chunk.frames;
+        this.postToWorklet({
+          type: "append",
+          generation: session.generation,
+          frames: chunk.frames,
+          channelCount: chunk.channelCount,
+          endOfStream: chunk.endOfStream,
+          samples,
+        });
+      } else if (chunk.endOfStream) {
+        this.postToWorklet({
+          type: "append",
+          generation: session.generation,
+          frames: 0,
+          channelCount: session.channelCount,
+          endOfStream: true,
+          samples: new Float32Array(),
+        });
+      }
+    } finally {
+      session.readInFlight = false;
+    }
+  }
+
+  private async fillBuffer(session: EngineSession, targetFrames: number) {
+    while (this.isActiveGeneration(session.generation, session.sessionId)) {
+      if (session.bufferedFrames >= targetFrames || session.endOfStream) {
+        return;
+      }
+
+      const bufferedBeforeRead = session.bufferedFrames;
+      await this.readNextChunk(session);
+      if (session.bufferedFrames === bufferedBeforeRead && session.endOfStream) {
+        return;
+      }
+    }
+  }
+
+  private async pumpSession(session: EngineSession) {
+    if (session.pumpPromise) {
+      return session.pumpPromise;
+    }
+
+    session.pumpPromise = (async () => {
+      while (this.isActiveGeneration(session.generation, session.sessionId)) {
+        if (session.endOfStream || session.bufferedFrames >= HIGH_WATER_FRAMES) {
+          return;
+        }
+
+        const bufferedBeforeRead = session.bufferedFrames;
+        await this.readNextChunk(session);
+        if (session.bufferedFrames === bufferedBeforeRead) {
+          return;
+        }
+      }
+    })().finally(() => {
+      if (this.isActiveGeneration(session.generation, session.sessionId)) {
+        session.pumpPromise = null;
+      }
     });
 
-    this.audio.pause();
-    this.audio.src = src;
-    this.objectUrl = objectUrl;
-    this.audio.load();
-
-    if (previousObjectUrl && previousObjectUrl !== objectUrl) {
-      this.revokeObjectUrl(previousObjectUrl);
-    }
-
-    await this.waitForLoadResult();
+    return session.pumpPromise;
   }
 
-  private async assignNativeFileSource(track: Track) {
-    await this.assignSource(convertFileSrc(track.path, PLAYBACK_FILE_PROTOCOL));
-  }
+  private pumpSessionInBackground(session: EngineSession) {
+    void this.pumpSession(session).catch((error) => {
+      if (!this.isActiveGeneration(session.generation, session.sessionId)) {
+        return;
+      }
 
-  private async assignDecodedSource(track: Track) {
-    const decodedPath = await prepareDecodedAudioForPlayback(track.path);
-
-    if (isPackagedWindowsPlayback(this.environment)) {
-      const bytes = await readPreparedPlaybackAudioBytes(decodedPath);
-      const blob = new Blob([new Uint8Array(bytes)], { type: "audio/wav" });
-      const objectUrl = URL.createObjectURL(blob);
-      await this.assignSource(objectUrl, objectUrl);
-      return;
-    }
-
-    await this.assignSource(convertFileSrc(decodedPath));
-  }
-
-  private shouldUseDecodedFallback(error: Error) {
-    const message = error.message.toLowerCase();
-    return message.includes("no supported source was found") || message.includes("demuxer_error_could_not_open");
-  }
-
-  private shouldSkipStrategy(track: Track, strategy: PlaybackSourceStrategy, previousErrors: Error[]) {
-    if (strategy !== "decoded-wav") {
-      return false;
-    }
-
-    if (isPackagedWindowsPlayback(this.environment)) {
-      return false;
-    }
-
-    if (track.format === "flac") {
-      return !previousErrors.some((error) => this.shouldUseDecodedFallback(error));
-    }
-
-    if (track.format === "wav") {
-      return !previousErrors.some((error) => this.shouldUseDecodedFallback(error));
-    }
-
-    return false;
-  }
-
-  private async runLoadStrategy(track: Track, strategy: PlaybackSourceStrategy) {
-    logPlaybackDebug("loading strategy started", {
-      strategy,
-      trackId: track.id,
-      format: track.format,
-      path: track.path,
+      const message = error instanceof Error ? error.message : "Playback buffering failed.";
+      this.notifyPlaybackError(message);
     });
-
-    if (strategy === "decoded-wav") {
-      await this.loadDecodedFallback(track);
-      return;
-    }
-
-    if (strategy === "native-file") {
-      await this.loadNativeFileFallback(track);
-      return;
-    }
-
-    await this.loadDirectSource(track);
   }
 
-  private buildStrategyFailure(track: Track, attemptedStrategies: PlaybackSourceStrategy[], errors: Error[]) {
-    const attemptSummary = attemptedStrategies.join(", ");
-    const errorSummary = errors.map((error) => error.message).join("; ");
-
-    return new Error(
-      `Playback could not start for "${track.title}" after trying ${attemptSummary}. ${errorSummary}`,
+  private isActiveGeneration(generation: number, sessionId?: number) {
+    return Boolean(
+      this.activeSession &&
+        this.activeSession.generation === generation &&
+        (sessionId === undefined || this.activeSession.sessionId === sessionId),
     );
   }
 
-  private async resumeAudioContextIfNeeded() {
+  private async loadInternal(track: Track, autoPlay: boolean, startTime = 0) {
+    const workletNode = await this.ensureWorkletNode();
     const audioContext = this.getAudioContext();
-    const previousState = audioContext.state;
+    const generation = this.generation + 1;
+    this.generation = generation;
+    this.loadedTrackId = track.id;
+    this.setPlayState(false);
+    this.setStatus("buffering");
+    this.emitTimeUpdate(startTime, track.durationMs / 1000);
 
-    logPlaybackDebug("checking audio context", {
-      beforeState: previousState,
-      trackId: this.loadedTrackId,
-    });
+    await this.teardownSession(generation, false);
 
-    if (previousState === "suspended") {
-      await audioContext.resume();
+    const metadata = await openPlaybackSession(track.path, audioContext.sampleRate, OUTPUT_CHANNEL_COUNT);
+    if (generation !== this.generation) {
+      void closePlaybackSession(metadata.sessionId);
+      return;
     }
 
-    logPlaybackDebug("audio context ready", {
-      beforeState: previousState,
-      afterState: audioContext.state,
-      trackId: this.loadedTrackId,
-    });
-  }
-
-  private async playMediaElement() {
-    logPlaybackDebug("calling audio.play()", {
-      trackId: this.loadedTrackId,
-      muted: this.audio.muted,
-      volume: this.audio.volume,
-      currentSrc: this.audio.currentSrc || this.audio.src || null,
-    });
-
-    await this.audio.play();
-
-    logPlaybackDebug("audio.play() resolved", {
-      trackId: this.loadedTrackId,
-      muted: this.audio.muted,
-      volume: this.audio.volume,
-      currentSrc: this.audio.currentSrc || this.audio.src || null,
-      paused: this.audio.paused,
-    });
-  }
-
-  private async loadDirectSource(track: Track) {
-    const startedAt = performance.now();
-    await this.assignSource(convertFileSrc(track.path));
-    logPlaybackDebug("loaded direct source", {
+    const session: EngineSession = {
+      generation,
+      sessionId: metadata.sessionId,
       trackId: track.id,
-      format: track.format,
-      path: track.path,
-      elapsedMs: Math.round(performance.now() - startedAt),
-    });
-  }
+      sampleRate: metadata.sampleRate,
+      channelCount: metadata.channelCount,
+      duration: metadata.durationSeconds || track.durationMs / 1000,
+      currentTime: metadata.currentTimeSeconds,
+      bufferedFrames: 0,
+      endOfStream: false,
+      readInFlight: false,
+      pumpPromise: null,
+    };
+    this.activeSession = session;
 
-  private async loadNativeFileFallback(track: Track) {
-    const startedAt = performance.now();
-    await this.assignNativeFileSource(track);
-    logPlaybackDebug("loaded native-file fallback", {
-      trackId: track.id,
-      format: track.format,
-      path: track.path,
-      elapsedMs: Math.round(performance.now() - startedAt),
-    });
-  }
+    if (startTime > 0) {
+      const seekResult = await seekPlaybackSession(session.sessionId, startTime);
+      if (!this.isActiveGeneration(generation, session.sessionId)) {
+        return;
+      }
 
-  private async loadDecodedFallback(track: Track) {
-    const startedAt = performance.now();
-    await this.assignDecodedSource(track);
-    logPlaybackDebug("loaded decoded wav fallback", {
+      session.currentTime = seekResult.currentTimeSeconds;
+      session.duration = seekResult.durationSeconds || session.duration;
+    }
+
+    this.resetWorklet(session, session.currentTime);
+    this.emitTimeUpdate(session.currentTime, session.duration);
+
+    await this.fillBuffer(session, STARTUP_BUFFER_FRAMES);
+    if (!this.isActiveGeneration(generation, session.sessionId)) {
+      return;
+    }
+
+    if (session.bufferedFrames === 0 && session.endOfStream) {
+      throw new Error("The audio file did not produce any decoded PCM samples.");
+    }
+
+    if (autoPlay) {
+      await this.resumeAudioContext();
+      this.setPlayState(true);
+      this.setStatus("playing");
+    } else {
+      await this.suspendAudioContext();
+      this.setPlayState(false);
+      this.setStatus("ready");
+    }
+
+    logPlaybackDebug("playback session ready", {
       trackId: track.id,
-      format: track.format,
-      path: track.path,
-      elapsedMs: Math.round(performance.now() - startedAt),
+      sessionId: session.sessionId,
+      currentTime: session.currentTime,
+      duration: session.duration,
+      bufferedFrames: session.bufferedFrames,
+      workletInitialized: Boolean(workletNode),
     });
+
+    this.pumpSessionInBackground(session);
   }
 
   async load(track: Track, autoPlay = true) {
-    const startedAt = performance.now();
-    this.loadedTrackId = track.id;
-    this.loadingSource = true;
-
     try {
-      const attemptedStrategies: PlaybackSourceStrategy[] = [];
-      const strategyErrors: Error[] = [];
-
-      for (const strategy of getTrackLoadStrategyOrder(track, this.environment)) {
-        if (this.shouldSkipStrategy(track, strategy, strategyErrors)) {
-          logPlaybackDebug("loading strategy skipped", {
-            strategy,
-            trackId: track.id,
-            format: track.format,
-            path: track.path,
-          });
-          continue;
-        }
-
-        attemptedStrategies.push(strategy);
-
-        try {
-          await this.runLoadStrategy(track, strategy);
-          logPlaybackDebug("loading strategy selected", {
-            strategy,
-            trackId: track.id,
-            format: track.format,
-            path: track.path,
-            attempts: attemptedStrategies,
-          });
-          break;
-        } catch (error) {
-          const strategyError = error instanceof Error ? error : new Error(`${strategy} playback failed.`);
-          strategyErrors.push(strategyError);
-          logPlaybackDebug("loading strategy failed", {
-            strategy,
-            trackId: track.id,
-            format: track.format,
-            path: track.path,
-            error: strategyError.message,
-            attempts: attemptedStrategies,
-          });
-        }
+      await this.loadInternal(track, autoPlay, 0);
+    } catch (error) {
+      if (this.loadedTrackId === track.id) {
+        await this.teardownSession(this.generation, false);
+        this.setStatus("error");
+        this.setPlayState(false);
       }
-
-      if (strategyErrors.length === attemptedStrategies.length) {
-        throw this.buildStrategyFailure(track, attemptedStrategies, strategyErrors);
-      }
-
-      logPlaybackDebug("load completed", {
-        trackId: track.id,
-        format: track.format,
-        path: track.path,
-        elapsedMs: Math.round(performance.now() - startedAt),
-      });
-
-      await this.resumeAudioContextIfNeeded();
-      if (autoPlay) {
-        await this.playMediaElement();
-      }
-    } finally {
-      this.loadingSource = false;
+      throw error;
     }
   }
 
   async play() {
-    await this.resumeAudioContextIfNeeded();
-    await this.playMediaElement();
+    if (!this.activeSession) {
+      return;
+    }
+
+    if (this.status === "ended") {
+      await this.seek(0);
+    }
+
+    await this.ensureWorkletNode();
+    await this.resumeAudioContext();
+    this.setPlayState(true);
+    this.setStatus("playing");
+    this.pumpSessionInBackground(this.activeSession);
   }
 
   async resume(track: Track, currentTime = 0) {
-    const shouldReload =
-      this.loadedTrackId !== track.id || !this.hasSource() || this.audio.readyState === HTMLMediaElement.HAVE_NOTHING;
+    const activeSession = this.activeSession;
+    const shouldReload = this.loadedTrackId !== track.id || !activeSession;
 
     if (shouldReload) {
-      await this.load(track, false);
-      await this.waitForMetadata();
-
-      if (currentTime > 0) {
-        const maxSeekTime = Number.isFinite(this.audio.duration) ? Math.max(this.audio.duration - 0.25, 0) : currentTime;
-        this.audio.currentTime = Math.min(currentTime, maxSeekTime);
-      }
+      await this.loadInternal(track, false, currentTime);
+    } else if (
+      currentTime > 0 &&
+      Math.abs(activeSession.currentTime - currentTime) > 0.25
+    ) {
+      await this.seek(currentTime);
     }
 
     await this.play();
   }
 
-  pause() {
-    this.audio.pause();
-  }
+  async pause() {
+    await this.suspendAudioContext();
+    this.setPlayState(false);
 
-  toggle() {
-    if (this.audio.paused) {
-      return this.play();
+    if (this.activeSession) {
+      this.setStatus("paused");
     }
-    this.pause();
-    return Promise.resolve();
   }
 
-  seek(seconds: number) {
-    this.audio.currentTime = seconds;
+  async toggle() {
+    if (this.playState) {
+      await this.pause();
+      return;
+    }
+
+    await this.play();
+  }
+
+  async seek(seconds: number) {
+    const session = this.activeSession;
+    if (!session) {
+      return;
+    }
+
+    this.setStatus(this.playState ? "buffering" : "ready");
+    session.bufferedFrames = 0;
+    session.endOfStream = false;
+    this.resetWorklet(session, seconds);
+
+    const result = await seekPlaybackSession(session.sessionId, seconds);
+    if (!this.isActiveGeneration(session.generation, session.sessionId)) {
+      return;
+    }
+
+    session.currentTime = result.currentTimeSeconds;
+    session.duration = result.durationSeconds || session.duration;
+    this.emitTimeUpdate(session.currentTime, session.duration);
+    await this.fillBuffer(session, STARTUP_BUFFER_FRAMES);
+    if (!this.isActiveGeneration(session.generation, session.sessionId)) {
+      return;
+    }
+
+    this.setStatus(this.playState ? "playing" : "ready");
+    this.pumpSessionInBackground(session);
   }
 
   setVolume(volume: number) {
-    this.audio.volume = volume;
+    this.volume = volume;
+    this.applyOutputGain();
   }
 
   setMuted(muted: boolean) {
-    this.audio.muted = muted;
+    this.muted = muted;
+    this.applyOutputGain();
   }
 
   reset() {
-    const previousObjectUrl = this.objectUrl;
+    const nextGeneration = this.generation + 1;
+    this.generation = nextGeneration;
+    this.setPlayState(false);
+    this.setStatus("idle");
+    this.emitTimeUpdate(0, 0);
+    void this.suspendAudioContext();
+    void this.teardownSession(nextGeneration, true);
+  }
 
-    logPlaybackDebug("resetting audio engine", {
-      loadedTrackId: this.loadedTrackId,
-      currentSrc: this.audio.currentSrc || this.audio.src || null,
-      hadObjectUrl: Boolean(previousObjectUrl),
-    });
-
-    this.loadedTrackId = null;
-    this.loadingSource = false;
-    this.audio.pause();
-    this.audio.currentTime = 0;
-    this.audio.removeAttribute("src");
-    this.objectUrl = null;
-    this.audio.load();
-
-    if (previousObjectUrl) {
-      this.revokeObjectUrl(previousObjectUrl);
-    }
+  notifyPlaybackError(message: string) {
+    this.setStatus("error");
+    this.setPlayState(false);
+    void this.suspendAudioContext();
+    void this.teardownSession(this.generation, false);
+    this.callbacks.onError?.(message);
   }
 }
 

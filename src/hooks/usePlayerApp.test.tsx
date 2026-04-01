@@ -113,6 +113,8 @@ describe("usePlayerApp", () => {
     });
     mockAudioEngine.load.mockResolvedValue(undefined);
     mockAudioEngine.resume.mockResolvedValue(undefined);
+    mockAudioEngine.pause.mockResolvedValue(undefined);
+    mockAudioEngine.seek.mockResolvedValue(undefined);
     mockAudioEngine.setCallbacks.mockImplementation((callbacks: AudioCallbacks) => {
       audioCallbacks = callbacks;
     });
@@ -362,10 +364,8 @@ describe("usePlayerApp", () => {
     vi.useRealTimers();
   });
 
-  it("surfaces attempted playback strategies when resume fails", async () => {
-    mockAudioEngine.resume.mockRejectedValueOnce(
-      new Error('Playback could not start for "Eyes Red" after trying native-file, direct-file, decoded-wav. decoder failed'),
-    );
+  it("surfaces playback failures when resume fails", async () => {
+    mockAudioEngine.resume.mockRejectedValueOnce(new Error("Playback session failed to buffer."));
 
     const { usePlayerApp } = await import("./usePlayerApp");
     let latestState: UsePlayerAppState | null = null;
@@ -394,9 +394,7 @@ describe("usePlayerApp", () => {
       await flushEffects();
     });
 
-    expect((latestState as UsePlayerAppState).error).toContain(
-      "after trying native-file, direct-file, decoded-wav",
-    );
+    expect((latestState as UsePlayerAppState).error).toContain("Playback session failed to buffer.");
 
     await act(async () => {
       root.unmount();

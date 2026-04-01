@@ -1,3 +1,5 @@
+mod playback;
+
 use http_range::HttpRange;
 use percent_encoding::percent_decode;
 use serde::{Deserialize, Serialize};
@@ -28,9 +30,13 @@ use symphonia::{
 use tauri::{
     http::{header, Method, Request, Response, StatusCode},
     menu::{Menu, MenuItem, PredefinedMenuItem, Submenu},
-    AppHandle, Emitter, Manager,
+    AppHandle, Emitter, Manager, State,
 };
 use walkdir::WalkDir;
+
+use playback::{
+    PlaybackFrameChunk, PlaybackSeekResult, PlaybackSessionManager, PlaybackSessionMetadata,
+};
 
 const LIBRARY_FILE: &str = "library.json";
 const SETTINGS_FILE: &str = "settings.json";
@@ -1309,6 +1315,59 @@ fn read_prepared_playback_audio_bytes(app: AppHandle, path: String) -> Result<Ve
     fs::read(resolved_path).map_err(|error| error.to_string())
 }
 
+#[tauri::command]
+async fn open_playback_session(
+    playback_sessions: State<'_, PlaybackSessionManager>,
+    path: String,
+    output_sample_rate: u32,
+    output_channel_count: Option<u16>,
+) -> Result<PlaybackSessionMetadata, String> {
+    let manager = playback_sessions.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        manager.open_session(Path::new(&path), output_sample_rate, output_channel_count)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn read_playback_frames(
+    playback_sessions: State<'_, PlaybackSessionManager>,
+    session_id: u64,
+    frame_count: usize,
+) -> Result<PlaybackFrameChunk, String> {
+    let manager = playback_sessions.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || manager.read_frames(session_id, frame_count))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn seek_playback_session(
+    playback_sessions: State<'_, PlaybackSessionManager>,
+    session_id: u64,
+    seconds: f64,
+) -> Result<PlaybackSeekResult, String> {
+    let manager = playback_sessions.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || manager.seek_session(session_id, seconds))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn close_playback_session(
+    playback_sessions: State<'_, PlaybackSessionManager>,
+    session_id: u64,
+) -> Result<(), String> {
+    let manager = playback_sessions.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        manager.close_session(session_id);
+        Ok::<(), String>(())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -1328,6 +1387,7 @@ pub fn run() {
             app.set_menu(menu)?;
             Ok(())
         })
+        .manage(PlaybackSessionManager::default())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .on_menu_event(|app, event| {
@@ -1342,7 +1402,11 @@ pub fn run() {
             save_settings,
             load_settings,
             prepare_decoded_audio_for_playback,
-            read_prepared_playback_audio_bytes
+            read_prepared_playback_audio_bytes,
+            open_playback_session,
+            read_playback_frames,
+            seek_playback_session,
+            close_playback_session
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

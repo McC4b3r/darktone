@@ -6,6 +6,33 @@ import type { AppSettings, LibraryData, LibraryScanResult, LibrarySyncResult } f
 
 export const LIBRARY_SCAN_PROGRESS_EVENT = "library-scan-progress";
 
+export interface PlaybackSessionMetadata {
+  sessionId: number;
+  sampleRate: number;
+  channelCount: number;
+  sourceSampleRate: number;
+  sourceChannelCount: number;
+  durationSeconds: number;
+  currentTimeSeconds: number;
+}
+
+export interface PlaybackFrameChunk {
+  sessionId: number;
+  sampleRate: number;
+  channelCount: number;
+  frames: number;
+  samples: number[];
+  endOfStream: boolean;
+  currentTimeSeconds: number;
+  durationSeconds: number;
+}
+
+export interface PlaybackSeekResult {
+  sessionId: number;
+  currentTimeSeconds: number;
+  durationSeconds: number;
+}
+
 export async function pickMusicFolders() {
   const selection = await open({
     directory: true,
@@ -40,12 +67,36 @@ export async function loadSettings() {
   return invoke<AppSettings>("load_settings");
 }
 
-export async function prepareDecodedAudioForPlayback(path: string) {
-  return invoke<string>("prepare_decoded_audio_for_playback", { path });
+export async function openPlaybackSession(
+  path: string,
+  outputSampleRate: number,
+  outputChannelCount = 2,
+) {
+  return invoke<PlaybackSessionMetadata>("open_playback_session", {
+    path,
+    outputSampleRate,
+    outputChannelCount,
+  });
 }
 
-export async function readPreparedPlaybackAudioBytes(path: string) {
-  return invoke<number[]>("read_prepared_playback_audio_bytes", { path });
+export async function readPlaybackFrames(sessionId: number, frameCount: number) {
+  return invoke<PlaybackFrameChunk>("read_playback_frames", {
+    sessionId,
+    frameCount,
+  });
+}
+
+export async function seekPlaybackSession(sessionId: number, seconds: number) {
+  return invoke<PlaybackSeekResult>("seek_playback_session", {
+    sessionId,
+    seconds,
+  });
+}
+
+export async function closePlaybackSession(sessionId: number) {
+  return invoke<void>("close_playback_session", {
+    sessionId,
+  });
 }
 
 function shouldHandleWatchEvent(event: WatchEvent) {

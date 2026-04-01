@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { audioEngine } from "../lib/audio";
+import type { PlaybackStatus } from "../lib/audio";
 import {
   filterLibrary,
   groupLibrary,
@@ -190,6 +191,7 @@ export function usePlayerApp() {
   const [syncMessage, setSyncMessage] = useState("Loading library…");
   const [scanProgress, setScanProgress] = useState<LibraryScanProgress | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [playbackStatus, setPlaybackStatus] = useState<PlaybackStatus>("idle");
   const [playbackState, setPlaybackState] = useState<PlaybackControlsState>({
     currentTrackId: null,
     isPlaying: false,
@@ -205,6 +207,7 @@ export function usePlayerApp() {
   const pendingChangedPathsRef = useRef<Set<string>>(new Set());
   const watcherSyncInFlightRef = useRef(false);
   const syncChangedPathsRef = useRef<(changedPaths: string[], announce?: boolean) => Promise<void>>(async () => undefined);
+  const playbackRequestIdRef = useRef(0);
 
   const normalizedLibrary = useMemo(() => normalizeLibrary(library), [library]);
   const filteredLibrary = useMemo(
@@ -252,6 +255,9 @@ export function usePlayerApp() {
       },
       onPlayStateChange: (isPlaying) => {
         setPlaybackState((state) => (state.isPlaying === isPlaying ? state : { ...state, isPlaying }));
+      },
+      onStatusChange: (status) => {
+        setPlaybackStatus((state) => (state === status ? state : status));
       },
       onEnded: () => {
         void playNext();
@@ -369,6 +375,7 @@ export function usePlayerApp() {
       setLoading(true);
       setError(null);
       audioEngine.reset();
+      playbackRequestIdRef.current += 1;
       resetPlaybackProgress();
       const [storedSettings, storedLibrary] = await Promise.all([
         loadSettings().catch(() => DEFAULT_SETTINGS),
@@ -496,6 +503,7 @@ export function usePlayerApp() {
       }));
       resetPlaybackProgress();
       audioEngine.reset();
+      playbackRequestIdRef.current += 1;
     }
   }
 
@@ -541,6 +549,8 @@ export function usePlayerApp() {
 
   async function playTrack(track: Track, sourceTracks = visibleTracks) {
     const startedAt = performance.now();
+    const playbackRequestId = playbackRequestIdRef.current + 1;
+    playbackRequestIdRef.current = playbackRequestId;
     try {
       setError(null);
       const albumContextTracks =
@@ -573,12 +583,18 @@ export function usePlayerApp() {
         elapsedMs: Math.round(performance.now() - startedAt),
       });
       await audioEngine.load(track);
+      if (playbackRequestIdRef.current !== playbackRequestId) {
+        return;
+      }
       logPlaybackDebug("track load finished from library", {
         trackId: track.id,
         format: track.format,
         elapsedMs: Math.round(performance.now() - startedAt),
       });
     } catch (cause) {
+      if (playbackRequestIdRef.current !== playbackRequestId) {
+        return;
+      }
       console.error(cause);
       setError(getPlaybackErrorMessage(cause));
     }
@@ -586,6 +602,8 @@ export function usePlayerApp() {
 
   async function playQueueIndex(index: number) {
     const startedAt = performance.now();
+    const playbackRequestId = playbackRequestIdRef.current + 1;
+    playbackRequestIdRef.current = playbackRequestId;
     try {
       setError(null);
       const track = tracksById.get(queue[index]?.trackId ?? "");
@@ -607,6 +625,9 @@ export function usePlayerApp() {
         elapsedMs: Math.round(performance.now() - startedAt),
       });
       await audioEngine.load(track);
+      if (playbackRequestIdRef.current !== playbackRequestId) {
+        return;
+      }
       logPlaybackDebug("queue track load finished", {
         trackId: track.id,
         format: track.format,
@@ -614,6 +635,9 @@ export function usePlayerApp() {
         elapsedMs: Math.round(performance.now() - startedAt),
       });
     } catch (cause) {
+      if (playbackRequestIdRef.current !== playbackRequestId) {
+        return;
+      }
       console.error(cause);
       setError(getPlaybackErrorMessage(cause));
     }
@@ -623,7 +647,7 @@ export function usePlayerApp() {
     try {
       setError(null);
       if (playbackState.isPlaying) {
-        audioEngine.pause();
+        await audioEngine.pause();
         return;
       }
 
@@ -698,6 +722,7 @@ export function usePlayerApp() {
 
     if (index === currentIndex) {
       audioEngine.reset();
+      playbackRequestIdRef.current += 1;
       setCurrentIndex(-1);
       setPlaybackState((state) => ({
         ...state,
@@ -730,8 +755,11 @@ export function usePlayerApp() {
   }
 
   function seek(seconds: number) {
-    audioEngine.seek(seconds);
     setPlaybackProgress((state) => ({ ...state, currentTime: seconds }));
+    void audioEngine.seek(seconds).catch((cause) => {
+      console.error(cause);
+      setError(getPlaybackErrorMessage(cause));
+    });
   }
 
   function chooseArtist(artistId: string | null) {
@@ -756,6 +784,7 @@ export function usePlayerApp() {
     loading,
     isSyncing,
     error,
+    playbackStatus,
     syncMessage,
     scanProgress,
     searchQuery,
