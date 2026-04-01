@@ -44,9 +44,12 @@ export function Sidebar({
   const previousSearchQueryRef = useRef(searchQuery);
   const scrollRequestKeyRef = useRef(0);
   const [scrollRequest, setScrollRequest] = useState<{ index: number; key: number } | null>(null);
-  const ARTIST_GROUP_ROW_HEIGHT = 44;
-  const ALBUM_ROW_HEIGHT = 42;
-  const TRACK_ROW_HEIGHT = 32;
+  const ARTIST_GROUP_ROW_HEIGHT = 28;
+  const ALBUM_ROW_HEIGHT = 28;
+  const TRACK_ROW_HEIGHT = 22;
+  const GROUP_ROW_GAP = 4;
+  const TRACK_ROW_GAP = 2;
+  const EXPANDED_GROUP_PADDING = 6;
   const [expandedPaneSpring] = useSpring(() => ({
     opacity: collapsed ? 0 : 1,
     x: collapsed ? -14 : 0,
@@ -179,17 +182,17 @@ export function Sidebar({
               scrollRequestKey={scrollRequest?.key ?? null}
               scrollAlignment="start"
               getItemSize={(artist) => {
-                let size = ARTIST_GROUP_ROW_HEIGHT + 6;
+                let size = ARTIST_GROUP_ROW_HEIGHT + GROUP_ROW_GAP;
 
                 if (selectedArtistId !== artist.id) {
                   return size;
                 }
 
-                size += 10;
+                size += EXPANDED_GROUP_PADDING;
                 size += artist.albums.reduce((total, album) => {
-                  let albumSize = ALBUM_ROW_HEIGHT + 6;
+                  let albumSize = ALBUM_ROW_HEIGHT + GROUP_ROW_GAP;
                   if (selectedAlbumId === album.id) {
-                    albumSize += 12 + album.tracks.length * (TRACK_ROW_HEIGHT + 2);
+                    albumSize += EXPANDED_GROUP_PADDING + album.tracks.length * (TRACK_ROW_HEIGHT + TRACK_ROW_GAP);
                   }
                   return total + albumSize;
                 }, 0);

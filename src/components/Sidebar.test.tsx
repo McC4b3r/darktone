@@ -287,7 +287,7 @@ describe("Sidebar", () => {
     });
 
     const artistList = container.querySelector<HTMLDivElement>(".artist-list");
-    expect(artistList?.scrollTop).toBe(50);
+    expect(artistList?.scrollTop).toBe(24);
 
     await act(async () => {
       root.unmount();

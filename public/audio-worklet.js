@@ -6,6 +6,7 @@ const PROGRESS_INTERVAL_FRAMES = 2_048;
 
 class DarktonePcmPlayerProcessor extends AudioWorkletProcessor {
   generation = 0;
+  operationToken = 0;
   playedFrames = 0;
   bufferedFrames = 0;
   endOfStream = false;
@@ -46,6 +47,7 @@ class DarktonePcmPlayerProcessor extends AudioWorkletProcessor {
       this.port.postMessage({
         type: "need-data",
         generation: this.generation,
+        operationToken: this.operationToken,
         bufferedFrames: this.bufferedFrames,
       });
     }
@@ -56,6 +58,7 @@ class DarktonePcmPlayerProcessor extends AudioWorkletProcessor {
       this.port.postMessage({
         type: "ended",
         generation: this.generation,
+        operationToken: this.operationToken,
         playedFrames: this.playedFrames,
       });
     }
@@ -66,6 +69,7 @@ class DarktonePcmPlayerProcessor extends AudioWorkletProcessor {
   handleMessage(message) {
     if (message.type === "reset") {
       this.generation = message.generation;
+      this.operationToken = message.operationToken;
       this.playedFrames = Math.max(0, message.playedFrames);
       this.bufferedFrames = 0;
       this.endOfStream = false;
@@ -76,7 +80,10 @@ class DarktonePcmPlayerProcessor extends AudioWorkletProcessor {
       return;
     }
 
-    if (message.generation !== this.generation) {
+    if (
+      message.generation !== this.generation ||
+      message.operationToken !== this.operationToken
+    ) {
       return;
     }
 
@@ -101,6 +108,7 @@ class DarktonePcmPlayerProcessor extends AudioWorkletProcessor {
     this.port.postMessage({
       type: "progress",
       generation: this.generation,
+      operationToken: this.operationToken,
       playedFrames: this.playedFrames,
       bufferedFrames: this.bufferedFrames,
     });

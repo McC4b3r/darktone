@@ -6,12 +6,16 @@ const mockOpenPlaybackSession = vi.fn();
 const mockReadPlaybackFrames = vi.fn();
 const mockSeekPlaybackSession = vi.fn();
 const mockClosePlaybackSession = vi.fn();
+const mockAppendPlaybackLogEntry = vi.fn();
+const mockGetPlaybackLogPath = vi.fn();
 
 vi.mock("./tauri", () => ({
   openPlaybackSession: (...args: unknown[]) => mockOpenPlaybackSession(...args),
   readPlaybackFrames: (...args: unknown[]) => mockReadPlaybackFrames(...args),
   seekPlaybackSession: (...args: unknown[]) => mockSeekPlaybackSession(...args),
   closePlaybackSession: (...args: unknown[]) => mockClosePlaybackSession(...args),
+  appendPlaybackLogEntry: (...args: unknown[]) => mockAppendPlaybackLogEntry(...args),
+  getPlaybackLogPath: (...args: unknown[]) => mockGetPlaybackLogPath(...args),
 }));
 
 class FakeMessagePort {
@@ -144,6 +148,21 @@ function latestWorkletPort() {
   return instance.port;
 }
 
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+
+  return {
+    promise,
+    resolve,
+    reject,
+  };
+}
+
 beforeEach(() => {
   vi.resetModules();
   vi.clearAllMocks();
@@ -154,7 +173,11 @@ beforeEach(() => {
   mockReadPlaybackFrames.mockReset();
   mockSeekPlaybackSession.mockReset();
   mockClosePlaybackSession.mockReset();
+  mockAppendPlaybackLogEntry.mockReset();
+  mockGetPlaybackLogPath.mockReset();
   mockClosePlaybackSession.mockResolvedValue(undefined);
+  mockAppendPlaybackLogEntry.mockResolvedValue(undefined);
+  mockGetPlaybackLogPath.mockResolvedValue("/tmp/darktone-playback.log");
 
   vi.stubGlobal("AudioContext", FakeAudioContext);
   vi.stubGlobal("AudioWorkletNode", FakeAudioWorkletNode);
@@ -173,7 +196,7 @@ describe("AudioEngine", () => {
 
     await engine.load(track, false);
 
-    expect(mockOpenPlaybackSession).toHaveBeenCalledWith(track.path, 48_000, 2);
+    expect(mockOpenPlaybackSession).toHaveBeenCalledWith(track.path, 48_000, 2, 1);
     expect(mockReadPlaybackFrames).toHaveBeenCalledTimes(3);
     expect(FakeAudioContext.instances[0]?.resume).not.toHaveBeenCalled();
     expect((FakeAudioContext.instances[0]?.audioWorklet.addModule as ReturnType<typeof vi.fn>)).toHaveBeenCalledTimes(1);
@@ -231,6 +254,7 @@ describe("AudioEngine", () => {
     latestWorkletPort().emit({
       type: "progress",
       generation: 1,
+      operationToken: 1,
       playedFrames: 24_000,
       bufferedFrames: 12_000,
     });
@@ -266,6 +290,7 @@ describe("AudioEngine", () => {
     firstPort.emit({
       type: "progress",
       generation: 1,
+      operationToken: 1,
       playedFrames: 48_000,
       bufferedFrames: 4_096,
     });
@@ -279,7 +304,8 @@ describe("AudioEngine", () => {
       .mockResolvedValueOnce(playbackChunk(41, 16_384))
       .mockResolvedValueOnce(playbackChunk(41, 16_384))
       .mockResolvedValueOnce(playbackChunk(41, 16_384))
-      .mockResolvedValueOnce(playbackChunk(41, 16_384));
+      .mockResolvedValueOnce(playbackChunk(41, 16_384))
+      .mockResolvedValue(playbackChunk(41, 16_384));
     mockSeekPlaybackSession.mockResolvedValue({
       sessionId: 41,
       currentTimeSeconds: 30,
@@ -299,12 +325,17 @@ describe("AudioEngine", () => {
 
     await engine.seek(30);
 
-    expect(mockSeekPlaybackSession).toHaveBeenCalledWith(41, 30);
+    expect(mockSeekPlaybackSession).toHaveBeenCalledWith(41, 30, 2);
     expect(mockReadPlaybackFrames).toHaveBeenCalledTimes(5);
     expect(callbacks.onTimeUpdate).toHaveBeenCalledWith(30, 180);
 
-    const resetMessage = (latestWorkletPort().sentMessages[0] ?? {}) as { type?: string; playedFrames?: number };
+    const resetMessage = (latestWorkletPort().sentMessages[0] ?? {}) as {
+      type?: string;
+      operationToken?: number;
+      playedFrames?: number;
+    };
     expect(resetMessage.type).toBe("reset");
+    expect(resetMessage.operationToken).toBe(2);
     expect(resetMessage.playedFrames).toBe(30 * 48_000);
   });
 
@@ -334,5 +365,167 @@ describe("AudioEngine", () => {
 
     expect(callbacks.onError).toHaveBeenCalledWith("decoder stalled");
     expect(callbacks.onPlayStateChange).toHaveBeenLastCalledWith(false);
+  });
+
+  it("waits for an in-flight background read to drain before starting a seek", async () => {
+    const backgroundRead = deferred<ReturnType<typeof playbackChunk>>();
+
+    mockOpenPlaybackSession.mockResolvedValue(playbackMetadata(61));
+    mockReadPlaybackFrames
+      .mockResolvedValueOnce(playbackChunk(61, 16_384))
+      .mockResolvedValueOnce(playbackChunk(61, 16_384))
+      .mockImplementationOnce(() => backgroundRead.promise)
+      .mockResolvedValueOnce(playbackChunk(61, 16_384))
+      .mockResolvedValueOnce(playbackChunk(61, 16_384));
+    mockSeekPlaybackSession.mockResolvedValue({
+      sessionId: 61,
+      currentTimeSeconds: 30,
+      durationSeconds: 180,
+    });
+
+    const { AudioEngine } = await import("./audio");
+    const engine = new AudioEngine();
+
+    await engine.load(track, true);
+    latestWorkletPort().sentMessages.length = 0;
+
+    const seekPromise = engine.seek(30);
+    await Promise.resolve();
+
+    expect(mockSeekPlaybackSession).not.toHaveBeenCalled();
+
+    backgroundRead.resolve(playbackChunk(61, 16_384));
+    await seekPromise;
+
+    expect(mockSeekPlaybackSession).toHaveBeenCalledTimes(1);
+    expect(mockSeekPlaybackSession).toHaveBeenCalledWith(61, 30, 2);
+    expect(mockReadPlaybackFrames).toHaveBeenCalledTimes(5);
+
+    const workletMessages = latestWorkletPort().sentMessages as Array<{
+      type?: string;
+      operationToken?: number;
+    }>;
+    expect(workletMessages[0]?.type).toBe("reset");
+    expect(
+      workletMessages
+        .filter((message) => message.type === "reset" || message.type === "append")
+        .every((message) => message.operationToken === 2),
+    ).toBe(true);
+  });
+
+  it("coalesces rapid seek requests down to the last target before the native seek starts", async () => {
+    const backgroundRead = deferred<ReturnType<typeof playbackChunk>>();
+
+    mockOpenPlaybackSession.mockResolvedValue(playbackMetadata(71));
+    mockReadPlaybackFrames
+      .mockResolvedValueOnce(playbackChunk(71, 16_384))
+      .mockResolvedValueOnce(playbackChunk(71, 16_384))
+      .mockImplementationOnce(() => backgroundRead.promise)
+      .mockResolvedValueOnce(playbackChunk(71, 16_384))
+      .mockResolvedValueOnce(playbackChunk(71, 16_384));
+    mockSeekPlaybackSession.mockResolvedValue({
+      sessionId: 71,
+      currentTimeSeconds: 30,
+      durationSeconds: 180,
+    });
+
+    const { AudioEngine } = await import("./audio");
+    const engine = new AudioEngine();
+
+    await engine.load(track, true);
+    latestWorkletPort().sentMessages.length = 0;
+
+    const firstSeek = engine.seek(10);
+    const secondSeek = engine.seek(20);
+    const thirdSeek = engine.seek(30);
+
+    await Promise.resolve();
+    expect(mockSeekPlaybackSession).not.toHaveBeenCalled();
+
+    backgroundRead.resolve(playbackChunk(71, 16_384));
+    await Promise.all([firstSeek, secondSeek, thirdSeek]);
+
+    expect(mockSeekPlaybackSession).toHaveBeenCalledTimes(1);
+    expect(mockSeekPlaybackSession).toHaveBeenCalledWith(71, 30, 3);
+    expect(mockReadPlaybackFrames).toHaveBeenCalledTimes(5);
+
+    const resetMessage = (latestWorkletPort().sentMessages[0] ?? {}) as {
+      type?: string;
+      operationToken?: number;
+    };
+    expect(resetMessage.type).toBe("reset");
+    expect(resetMessage.operationToken).toBe(3);
+  });
+
+  it("ignores stale worklet events after a seek resets the operation token", async () => {
+    mockOpenPlaybackSession.mockResolvedValue(playbackMetadata(81));
+    mockReadPlaybackFrames
+      .mockResolvedValueOnce(playbackChunk(81, 16_384))
+      .mockResolvedValueOnce(playbackChunk(81, 16_384))
+      .mockResolvedValueOnce(playbackChunk(81, 8_192, { endOfStream: true }))
+      .mockResolvedValueOnce(playbackChunk(81, 16_384))
+      .mockResolvedValueOnce(playbackChunk(81, 16_384));
+    mockSeekPlaybackSession.mockResolvedValue({
+      sessionId: 81,
+      currentTimeSeconds: 30,
+      durationSeconds: 180,
+    });
+
+    const onEnded = vi.fn();
+    const onTimeUpdate = vi.fn();
+    const callbacks: AudioCallbacks = {
+      onEnded,
+      onTimeUpdate,
+    };
+
+    const { AudioEngine } = await import("./audio");
+    const engine = new AudioEngine();
+    engine.setCallbacks(callbacks);
+
+    await engine.load(track, false);
+    await engine.seek(30);
+
+    onEnded.mockClear();
+    onTimeUpdate.mockClear();
+    const readCallsBefore = mockReadPlaybackFrames.mock.calls.length;
+
+    latestWorkletPort().emit({
+      type: "need-data",
+      generation: 1,
+      operationToken: 1,
+      bufferedFrames: 0,
+    });
+    latestWorkletPort().emit({
+      type: "progress",
+      generation: 1,
+      operationToken: 1,
+      playedFrames: 48_000,
+      bufferedFrames: 0,
+    });
+    latestWorkletPort().emit({
+      type: "ended",
+      generation: 1,
+      operationToken: 1,
+      playedFrames: 48_000,
+    });
+
+    expect(mockReadPlaybackFrames).toHaveBeenCalledTimes(readCallsBefore);
+    expect(onTimeUpdate).not.toHaveBeenCalled();
+    expect(onEnded).not.toHaveBeenCalled();
+  });
+
+  it("fails fast when a native read returns no frames without ending the stream", async () => {
+    mockOpenPlaybackSession.mockResolvedValue(playbackMetadata(91));
+    mockReadPlaybackFrames
+      .mockResolvedValueOnce(playbackChunk(91, 16_384))
+      .mockResolvedValueOnce(playbackChunk(91, 0));
+
+    const { AudioEngine } = await import("./audio");
+    const engine = new AudioEngine();
+
+    await expect(engine.load(track, false)).rejects.toThrow(
+      "Playback stalled while waiting for decoded audio frames.",
+    );
+    expect(mockReadPlaybackFrames).toHaveBeenCalledTimes(2);
   });
 });

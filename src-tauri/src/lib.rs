@@ -3,15 +3,18 @@ mod playback;
 use http_range::HttpRange;
 use percent_encoding::percent_decode;
 use serde::{Deserialize, Serialize};
+use serde_json::Value as JsonValue;
 use std::{
     collections::hash_map::DefaultHasher,
     collections::HashMap,
     collections::HashSet,
     fs,
     fs::File,
+    fs::OpenOptions,
     hash::{Hash, Hasher},
     io::{ErrorKind, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
+    sync::{Arc, Mutex},
     time::Instant,
     time::UNIX_EPOCH,
 };
@@ -45,6 +48,161 @@ const PLAYBACK_FILE_PROTOCOL: &str = "playback";
 const PLAYBACK_DECODE_CACHE_DIR: &str = "playback-cache";
 const WAV_HEADER_SIZE: usize = 44;
 const PLAYBACK_MAX_RANGE_LEN: u64 = 1000 * 1024;
+const PLAYBACK_LOG_FILE: &str = "playback.log";
+const PLAYBACK_LOG_ARCHIVE_FILE: &str = "playback.log.1";
+const PLAYBACK_LOG_MAX_BYTES: u64 = 512 * 1024;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum PlaybackLogSource {
+    Frontend,
+    Native,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum PlaybackLogLevel {
+    Debug,
+    Info,
+    Warn,
+    Error,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PlaybackLogEntry {
+    timestamp_ms: u64,
+    source: PlaybackLogSource,
+    event: String,
+    #[serde(default)]
+    level: Option<PlaybackLogLevel>,
+    #[serde(default)]
+    session_id: Option<u64>,
+    #[serde(default)]
+    operation_token: Option<u64>,
+    #[serde(default)]
+    track_id: Option<String>,
+    #[serde(default)]
+    requested_seconds: Option<f64>,
+    #[serde(default)]
+    actual_seconds: Option<f64>,
+    #[serde(default)]
+    duration_ms: Option<u64>,
+    #[serde(default)]
+    details: Option<JsonValue>,
+}
+
+#[derive(Clone, Default)]
+struct PlaybackDiagnostics {
+    state: Option<Arc<PlaybackDiagnosticsState>>,
+}
+
+struct PlaybackDiagnosticsState {
+    log_path: PathBuf,
+    archive_path: PathBuf,
+    write_lock: Mutex<()>,
+}
+
+#[derive(Default)]
+struct NativePlaybackLogOptions {
+    level: Option<PlaybackLogLevel>,
+    session_id: Option<u64>,
+    operation_token: Option<u64>,
+    track_id: Option<String>,
+    requested_seconds: Option<f64>,
+    actual_seconds: Option<f64>,
+    duration_ms: Option<u64>,
+    details: Option<JsonValue>,
+}
+
+impl PlaybackDiagnostics {
+    fn new(app: &AppHandle) -> Result<Self, String> {
+        let directory = app_data_dir(app)?;
+        Ok(Self {
+            state: Some(Arc::new(PlaybackDiagnosticsState {
+                log_path: directory.join(PLAYBACK_LOG_FILE),
+                archive_path: directory.join(PLAYBACK_LOG_ARCHIVE_FILE),
+                write_lock: Mutex::new(()),
+            })),
+        })
+    }
+
+    fn log_path_string(&self) -> Result<String, String> {
+        let state = self
+            .state
+            .as_ref()
+            .ok_or_else(|| "Playback diagnostics are unavailable.".to_string())?;
+        Ok(state.log_path.to_string_lossy().into_owned())
+    }
+
+    fn append(&self, mut entry: PlaybackLogEntry) -> Result<(), String> {
+        let Some(state) = self.state.as_ref() else {
+            return Ok(());
+        };
+
+        if entry.timestamp_ms == 0 {
+            entry.timestamp_ms = current_timestamp_ms();
+        }
+
+        let serialized = serde_json::to_string(&entry).map_err(|error| error.to_string())?;
+        let _guard = state
+            .write_lock
+            .lock()
+            .map_err(|_| "Playback diagnostics are unavailable.".to_string())?;
+
+        self.rotate_if_needed(state, serialized.len() as u64 + 1)?;
+
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&state.log_path)
+            .map_err(|error| error.to_string())?;
+        file.write_all(serialized.as_bytes())
+            .and_then(|_| file.write_all(b"\n"))
+            .map_err(|error| error.to_string())
+    }
+
+    fn append_native(&self, event: &str, options: NativePlaybackLogOptions) {
+        let _ = self.append(PlaybackLogEntry {
+            timestamp_ms: current_timestamp_ms(),
+            source: PlaybackLogSource::Native,
+            event: event.to_string(),
+            level: options.level,
+            session_id: options.session_id,
+            operation_token: options.operation_token,
+            track_id: options.track_id,
+            requested_seconds: options.requested_seconds,
+            actual_seconds: options.actual_seconds,
+            duration_ms: options.duration_ms,
+            details: options.details,
+        });
+    }
+
+    fn rotate_if_needed(
+        &self,
+        state: &PlaybackDiagnosticsState,
+        incoming_len: u64,
+    ) -> Result<(), String> {
+        let existing_len = fs::metadata(&state.log_path)
+            .map(|metadata| metadata.len())
+            .unwrap_or_default();
+        if existing_len.saturating_add(incoming_len) <= PLAYBACK_LOG_MAX_BYTES {
+            return Ok(());
+        }
+
+        match fs::remove_file(&state.archive_path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => return Err(error.to_string()),
+        }
+
+        match fs::rename(&state.log_path, &state.archive_path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error.to_string()),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1321,10 +1479,16 @@ async fn open_playback_session(
     path: String,
     output_sample_rate: u32,
     output_channel_count: Option<u16>,
+    operation_token: Option<u64>,
 ) -> Result<PlaybackSessionMetadata, String> {
     let manager = playback_sessions.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        manager.open_session(Path::new(&path), output_sample_rate, output_channel_count)
+        manager.open_session(
+            Path::new(&path),
+            output_sample_rate,
+            output_channel_count,
+            operation_token,
+        )
     })
     .await
     .map_err(|error| error.to_string())?
@@ -1335,9 +1499,12 @@ async fn read_playback_frames(
     playback_sessions: State<'_, PlaybackSessionManager>,
     session_id: u64,
     frame_count: usize,
+    operation_token: Option<u64>,
 ) -> Result<PlaybackFrameChunk, String> {
     let manager = playback_sessions.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || manager.read_frames(session_id, frame_count))
+    tauri::async_runtime::spawn_blocking(move || {
+        manager.read_frames(session_id, frame_count, operation_token)
+    })
         .await
         .map_err(|error| error.to_string())?
 }
@@ -1347,9 +1514,12 @@ async fn seek_playback_session(
     playback_sessions: State<'_, PlaybackSessionManager>,
     session_id: u64,
     seconds: f64,
+    operation_token: Option<u64>,
 ) -> Result<PlaybackSeekResult, String> {
     let manager = playback_sessions.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || manager.seek_session(session_id, seconds))
+    tauri::async_runtime::spawn_blocking(move || {
+        manager.seek_session(session_id, seconds, operation_token)
+    })
         .await
         .map_err(|error| error.to_string())?
 }
@@ -1366,6 +1536,21 @@ async fn close_playback_session(
     })
     .await
     .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+fn append_playback_log_entry(
+    playback_diagnostics: State<'_, PlaybackDiagnostics>,
+    entry: PlaybackLogEntry,
+) -> Result<(), String> {
+    playback_diagnostics.append(entry)
+}
+
+#[tauri::command]
+fn get_playback_log_path(
+    playback_diagnostics: State<'_, PlaybackDiagnostics>,
+) -> Result<String, String> {
+    playback_diagnostics.log_path_string()
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -1385,9 +1570,11 @@ pub fn run() {
             let file_menu = Submenu::with_items(app, "File", true, &[&open, &quit])?;
             let menu = Menu::with_items(app, &[&file_menu])?;
             app.set_menu(menu)?;
+            let playback_diagnostics = PlaybackDiagnostics::new(&app.handle())?;
+            app.manage(playback_diagnostics.clone());
+            app.manage(PlaybackSessionManager::new(playback_diagnostics));
             Ok(())
         })
-        .manage(PlaybackSessionManager::default())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .on_menu_event(|app, event| {
@@ -1406,7 +1593,9 @@ pub fn run() {
             open_playback_session,
             read_playback_frames,
             seek_playback_session,
-            close_playback_session
+            close_playback_session,
+            append_playback_log_entry,
+            get_playback_log_path
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

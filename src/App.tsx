@@ -140,7 +140,7 @@ export default function App() {
 
   const expandedSidebarWidth = narrowDesktop ? 240 : 242;
   const [sidebarSpring] = useSpring(() => ({
-    sidebarWidth: sidebarCollapsed ? 84 : expandedSidebarWidth,
+    sidebarWidth: sidebarCollapsed ? 76 : expandedSidebarWidth,
     delay: sidebarCollapsed ? 55 : 0,
     config: {
       tension: 340,

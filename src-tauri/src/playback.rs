@@ -1,3 +1,4 @@
+use super::{NativePlaybackLogOptions, PlaybackDiagnostics, PlaybackLogLevel};
 use serde::Serialize;
 use std::{
     collections::HashMap,
@@ -7,6 +8,7 @@ use std::{
         atomic::{AtomicU64, Ordering},
         Arc, Mutex,
     },
+    time::Instant,
 };
 use symphonia::{
     core::{
@@ -55,8 +57,9 @@ pub struct PlaybackSeekResult {
     pub duration_seconds: f64,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct PlaybackSessionManager {
+    diagnostics: PlaybackDiagnostics,
     inner: Arc<PlaybackSessionManagerInner>,
 }
 
@@ -67,19 +70,66 @@ struct PlaybackSessionManagerInner {
 }
 
 impl PlaybackSessionManager {
+    pub fn new(diagnostics: PlaybackDiagnostics) -> Self {
+        Self {
+            diagnostics,
+            inner: Arc::new(PlaybackSessionManagerInner::default()),
+        }
+    }
+
     pub fn open_session(
         &self,
         path: &Path,
         output_sample_rate: u32,
         output_channel_count: Option<u16>,
+        operation_token: Option<u64>,
     ) -> Result<PlaybackSessionMetadata, String> {
         if output_sample_rate == 0 {
             return Err("Playback output sample rate must be greater than zero.".into());
         }
 
+        let open_started_at = Instant::now();
+        self.diagnostics.append_native(
+            "native-open-requested",
+            NativePlaybackLogOptions {
+                level: Some(PlaybackLogLevel::Info),
+                operation_token,
+                details: Some(serde_json::json!({
+                    "path": path.to_string_lossy(),
+                    "outputSampleRate": output_sample_rate,
+                    "outputChannelCount": output_channel_count.unwrap_or(DEFAULT_OUTPUT_CHANNELS),
+                })),
+                ..NativePlaybackLogOptions::default()
+            },
+        );
+
         let session_id = self.inner.next_id.fetch_add(1, Ordering::Relaxed) + 1;
-        let session =
-            PlaybackSession::open(path, output_sample_rate, output_channel_count.unwrap_or(DEFAULT_OUTPUT_CHANNELS))?;
+        let session = match PlaybackSession::open(
+            path,
+            output_sample_rate,
+            output_channel_count.unwrap_or(DEFAULT_OUTPUT_CHANNELS),
+        ) {
+            Ok(session) => session,
+            Err(error) => {
+                self.diagnostics.append_native(
+                    "native-open-failed",
+                    NativePlaybackLogOptions {
+                        level: Some(PlaybackLogLevel::Error),
+                        session_id: Some(session_id),
+                        operation_token,
+                        duration_ms: Some(open_started_at.elapsed().as_millis() as u64),
+                        details: Some(serde_json::json!({
+                            "path": path.to_string_lossy(),
+                            "outputSampleRate": output_sample_rate,
+                            "outputChannelCount": output_channel_count.unwrap_or(DEFAULT_OUTPUT_CHANNELS),
+                            "message": error,
+                        })),
+                        ..NativePlaybackLogOptions::default()
+                    },
+                );
+                return Err(error);
+            }
+        };
         let metadata = session.metadata(session_id);
 
         let mut sessions = self
@@ -89,6 +139,26 @@ impl PlaybackSessionManager {
             .map_err(|_| "Playback session manager is unavailable.".to_string())?;
         sessions.insert(session_id, session);
 
+        self.diagnostics.append_native(
+            "native-open-finished",
+            NativePlaybackLogOptions {
+                level: Some(PlaybackLogLevel::Info),
+                session_id: Some(session_id),
+                operation_token,
+                actual_seconds: Some(metadata.current_time_seconds),
+                duration_ms: Some(open_started_at.elapsed().as_millis() as u64),
+                details: Some(serde_json::json!({
+                    "path": path.to_string_lossy(),
+                    "durationSeconds": metadata.duration_seconds,
+                    "sampleRate": metadata.sample_rate,
+                    "channelCount": metadata.channel_count,
+                    "sourceSampleRate": metadata.source_sample_rate,
+                    "sourceChannelCount": metadata.source_channel_count,
+                })),
+                ..NativePlaybackLogOptions::default()
+            },
+        );
+
         Ok(metadata)
     }
 
@@ -96,44 +166,198 @@ impl PlaybackSessionManager {
         &self,
         session_id: u64,
         frame_count: usize,
+        operation_token: Option<u64>,
     ) -> Result<PlaybackFrameChunk, String> {
+        let lock_wait_started_at = Instant::now();
         let mut sessions = self
             .inner
             .sessions
             .lock()
             .map_err(|_| "Playback session manager is unavailable.".to_string())?;
+        let lock_wait_ms = lock_wait_started_at.elapsed().as_millis() as u64;
         let session = sessions
             .get_mut(&session_id)
             .ok_or_else(|| format!("Playback session {session_id} was not found."))?;
 
-        session.read_frames(session_id, frame_count)
+        self.diagnostics.append_native(
+            "native-read-requested",
+            NativePlaybackLogOptions {
+                level: Some(PlaybackLogLevel::Info),
+                session_id: Some(session_id),
+                operation_token,
+                duration_ms: Some(lock_wait_ms),
+                details: Some(serde_json::json!({
+                    "frameCount": frame_count,
+                    "lockWaitMs": lock_wait_ms,
+                    "state": session.diagnostic_state(),
+                })),
+                ..NativePlaybackLogOptions::default()
+            },
+        );
+
+        let read_started_at = Instant::now();
+        let outcome = session.read_frames(
+            session_id,
+            frame_count,
+            operation_token,
+            &self.diagnostics,
+        );
+
+        match &outcome {
+            Ok(chunk) => self.diagnostics.append_native(
+                "native-read-finished",
+                NativePlaybackLogOptions {
+                    level: Some(PlaybackLogLevel::Info),
+                    session_id: Some(session_id),
+                    operation_token,
+                    actual_seconds: Some(chunk.current_time_seconds),
+                    duration_ms: Some(read_started_at.elapsed().as_millis() as u64),
+                    details: Some(serde_json::json!({
+                        "frameCount": frame_count,
+                        "frames": chunk.frames,
+                        "endOfStream": chunk.end_of_stream,
+                        "lockWaitMs": lock_wait_ms,
+                        "state": session.diagnostic_state(),
+                    })),
+                    ..NativePlaybackLogOptions::default()
+                },
+            ),
+            Err(error) => self.diagnostics.append_native(
+                "native-read-failed",
+                NativePlaybackLogOptions {
+                    level: Some(PlaybackLogLevel::Error),
+                    session_id: Some(session_id),
+                    operation_token,
+                    duration_ms: Some(read_started_at.elapsed().as_millis() as u64),
+                    details: Some(serde_json::json!({
+                        "frameCount": frame_count,
+                        "lockWaitMs": lock_wait_ms,
+                        "message": error,
+                        "state": session.diagnostic_state(),
+                    })),
+                    ..NativePlaybackLogOptions::default()
+                },
+            ),
+        }
+
+        outcome
     }
 
     pub fn seek_session(
         &self,
         session_id: u64,
         seconds: f64,
+        operation_token: Option<u64>,
     ) -> Result<PlaybackSeekResult, String> {
+        let lock_wait_started_at = Instant::now();
         let mut sessions = self
             .inner
             .sessions
             .lock()
             .map_err(|_| "Playback session manager is unavailable.".to_string())?;
+        let lock_wait_ms = lock_wait_started_at.elapsed().as_millis() as u64;
         let session = sessions
             .get_mut(&session_id)
             .ok_or_else(|| format!("Playback session {session_id} was not found."))?;
 
-        session.seek(session_id, seconds)
+        self.diagnostics.append_native(
+            "native-seek-requested",
+            NativePlaybackLogOptions {
+                level: Some(PlaybackLogLevel::Info),
+                session_id: Some(session_id),
+                operation_token,
+                requested_seconds: Some(seconds),
+                duration_ms: Some(lock_wait_ms),
+                details: Some(serde_json::json!({
+                    "lockWaitMs": lock_wait_ms,
+                    "state": session.diagnostic_state(),
+                })),
+                ..NativePlaybackLogOptions::default()
+            },
+        );
+
+        let seek_started_at = Instant::now();
+        let outcome = session.seek(session_id, seconds, operation_token, &self.diagnostics);
+
+        match &outcome {
+            Ok(result) => self.diagnostics.append_native(
+                "native-seek-finished",
+                NativePlaybackLogOptions {
+                    level: Some(PlaybackLogLevel::Info),
+                    session_id: Some(session_id),
+                    operation_token,
+                    requested_seconds: Some(seconds),
+                    actual_seconds: Some(result.current_time_seconds),
+                    duration_ms: Some(seek_started_at.elapsed().as_millis() as u64),
+                    details: Some(serde_json::json!({
+                        "durationSeconds": result.duration_seconds,
+                        "lockWaitMs": lock_wait_ms,
+                        "state": session.diagnostic_state(),
+                    })),
+                    ..NativePlaybackLogOptions::default()
+                },
+            ),
+            Err(error) => self.diagnostics.append_native(
+                "native-seek-failed",
+                NativePlaybackLogOptions {
+                    level: Some(PlaybackLogLevel::Error),
+                    session_id: Some(session_id),
+                    operation_token,
+                    requested_seconds: Some(seconds),
+                    duration_ms: Some(seek_started_at.elapsed().as_millis() as u64),
+                    details: Some(serde_json::json!({
+                        "lockWaitMs": lock_wait_ms,
+                        "message": error,
+                        "state": session.diagnostic_state(),
+                    })),
+                    ..NativePlaybackLogOptions::default()
+                },
+            ),
+        }
+
+        outcome
     }
 
     pub fn close_session(&self, session_id: u64) {
+        self.diagnostics.append_native(
+            "native-close-requested",
+            NativePlaybackLogOptions {
+                level: Some(PlaybackLogLevel::Info),
+                session_id: Some(session_id),
+                ..NativePlaybackLogOptions::default()
+            },
+        );
+
+        let lock_wait_started_at = Instant::now();
         if let Ok(mut sessions) = self.inner.sessions.lock() {
-            sessions.remove(&session_id);
+            let lock_wait_ms = lock_wait_started_at.elapsed().as_millis() as u64;
+            let removed = sessions.remove(&session_id);
+            self.diagnostics.append_native(
+                "native-close-finished",
+                NativePlaybackLogOptions {
+                    level: Some(PlaybackLogLevel::Info),
+                    session_id: Some(session_id),
+                    duration_ms: Some(lock_wait_ms),
+                    details: Some(serde_json::json!({
+                        "lockWaitMs": lock_wait_ms,
+                        "sessionFound": removed.is_some(),
+                        "state": removed.as_ref().map(PlaybackSession::diagnostic_state),
+                    })),
+                    ..NativePlaybackLogOptions::default()
+                },
+            );
         }
     }
 }
 
+impl Default for PlaybackSessionManager {
+    fn default() -> Self {
+        Self::new(PlaybackDiagnostics::default())
+    }
+}
+
 struct PlaybackSession {
+    source_path: String,
     format: Box<dyn FormatReader>,
     decoder: Box<dyn Decoder>,
     track_id: u32,
@@ -188,6 +412,7 @@ impl PlaybackSession {
             .unwrap_or_default();
 
         let mut session = Self {
+            source_path: path.to_string_lossy().into_owned(),
             format,
             decoder,
             track_id,
@@ -262,6 +487,8 @@ impl PlaybackSession {
         &mut self,
         session_id: u64,
         frame_count: usize,
+        operation_token: Option<u64>,
+        diagnostics: &PlaybackDiagnostics,
     ) -> Result<PlaybackFrameChunk, String> {
         if frame_count == 0 {
             return Ok(PlaybackFrameChunk {
@@ -311,24 +538,65 @@ impl PlaybackSession {
             frames += 1;
         }
 
+        let end_of_stream = self.end_of_stream && !self.can_render_frame();
+        if frames == 0 && !end_of_stream {
+            diagnostics.append_native(
+                "native-read-impossible-empty-chunk",
+                NativePlaybackLogOptions {
+                    level: Some(PlaybackLogLevel::Error),
+                    session_id: Some(session_id),
+                    operation_token,
+                    details: Some(serde_json::json!({
+                        "frameCount": frame_count,
+                        "state": self.diagnostic_state(),
+                    })),
+                    ..NativePlaybackLogOptions::default()
+                },
+            );
+            return Err(
+                "Playback decoder returned 0 frames without reaching end of stream.".into(),
+            );
+        }
+
         Ok(PlaybackFrameChunk {
             session_id,
             sample_rate: self.output_sample_rate,
             channel_count: self.output_channel_count,
             frames,
             samples,
-            end_of_stream: self.end_of_stream && !self.can_render_frame(),
+            end_of_stream,
             current_time_seconds: self.current_time_seconds(),
             duration_seconds: self.duration_seconds,
         })
     }
 
-    fn seek(&mut self, session_id: u64, seconds: f64) -> Result<PlaybackSeekResult, String> {
+    fn seek(
+        &mut self,
+        session_id: u64,
+        seconds: f64,
+        operation_token: Option<u64>,
+        diagnostics: &PlaybackDiagnostics,
+    ) -> Result<PlaybackSeekResult, String> {
         let clamped_seconds = if self.duration_seconds > 0.0 {
             seconds.clamp(0.0, self.duration_seconds)
         } else {
             seconds.max(0.0)
         };
+
+        diagnostics.append_native(
+            "native-seek-started",
+            NativePlaybackLogOptions {
+                level: Some(PlaybackLogLevel::Info),
+                session_id: Some(session_id),
+                operation_token,
+                requested_seconds: Some(seconds),
+                details: Some(serde_json::json!({
+                    "clampedSeconds": clamped_seconds,
+                    "state": self.diagnostic_state(),
+                })),
+                ..NativePlaybackLogOptions::default()
+            },
+        );
 
         let seeked_to = self
             .format
@@ -357,11 +625,30 @@ impl PlaybackSession {
         self.output_frames_emitted =
             (clamped_seconds * self.output_sample_rate as f64).round().max(0.0) as u64;
 
-        Ok(PlaybackSeekResult {
+        let result = PlaybackSeekResult {
             session_id,
             current_time_seconds: self.current_time_seconds(),
             duration_seconds: self.duration_seconds,
-        })
+        };
+
+        diagnostics.append_native(
+            "native-seek-state-updated",
+            NativePlaybackLogOptions {
+                level: Some(PlaybackLogLevel::Info),
+                session_id: Some(session_id),
+                operation_token,
+                requested_seconds: Some(seconds),
+                actual_seconds: Some(result.current_time_seconds),
+                details: Some(serde_json::json!({
+                    "clampedSeconds": clamped_seconds,
+                    "actualTimestamp": seeked_to.actual_ts,
+                    "state": self.diagnostic_state(),
+                })),
+                ..NativePlaybackLogOptions::default()
+            },
+        );
+
+        Ok(result)
     }
 
     fn ensure_renderable_frame(&mut self) -> Result<(), String> {
@@ -489,6 +776,21 @@ impl PlaybackSession {
         let right = self.decoded_samples.get(base_index + 1).copied().unwrap_or(left);
         (left, right)
     }
+
+    fn diagnostic_state(&self) -> serde_json::Value {
+        serde_json::json!({
+            "path": self.source_path.clone(),
+            "decodedBufferStartFrame": self.decoded_buffer_start_frame,
+            "availableSourceFrames": self.available_source_frames(),
+            "sourceFrameCursor": self.source_frame_cursor,
+            "outputFramesEmitted": self.output_frames_emitted,
+            "endOfStream": self.end_of_stream,
+            "sourceSampleRate": self.source_sample_rate,
+            "sourceChannelCount": self.source_channel_count,
+            "outputSampleRate": self.output_sample_rate,
+            "outputChannelCount": self.output_channel_count,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -572,7 +874,7 @@ mod tests {
 
         let manager = PlaybackSessionManager::default();
         let metadata = manager
-            .open_session(&wav_path, 48_000, Some(2))
+            .open_session(&wav_path, 48_000, Some(2), None)
             .expect("playback session should open");
 
         assert_eq!(metadata.sample_rate, 48_000);
@@ -581,7 +883,7 @@ mod tests {
         assert!(metadata.duration_seconds > 0.9);
 
         let first_chunk = manager
-            .read_frames(metadata.session_id, 4096)
+            .read_frames(metadata.session_id, 4096, None)
             .expect("frames should read");
         assert_eq!(first_chunk.sample_rate, 48_000);
         assert_eq!(first_chunk.channel_count, 2);
@@ -590,20 +892,20 @@ mod tests {
         assert!(first_chunk.current_time_seconds > 0.08);
 
         let seek_result = manager
-            .seek_session(metadata.session_id, 0.5)
+            .seek_session(metadata.session_id, 0.5, None)
             .expect("seek should succeed");
         assert!(seek_result.current_time_seconds >= 0.49);
         assert!(seek_result.current_time_seconds <= 0.51);
 
         let second_chunk = manager
-            .read_frames(metadata.session_id, 2048)
+            .read_frames(metadata.session_id, 2048, None)
             .expect("frames after seek should read");
         assert_eq!(second_chunk.frames, 2048);
         assert!(second_chunk.current_time_seconds >= 0.53);
 
         manager.close_session(metadata.session_id);
         let error = manager
-            .read_frames(metadata.session_id, 512)
+            .read_frames(metadata.session_id, 512, None)
             .expect_err("closed sessions should fail");
         assert!(error.contains("was not found"));
     }
@@ -616,7 +918,7 @@ mod tests {
 
         let manager = PlaybackSessionManager::default();
         let metadata = manager
-            .open_session(&wav_path, 44_100, Some(2))
+            .open_session(&wav_path, 44_100, Some(2), None)
             .expect("playback session should open");
 
         let mut total_frames = 0usize;
@@ -624,12 +926,66 @@ mod tests {
 
         while !end_of_stream {
             let chunk = manager
-                .read_frames(metadata.session_id, 512)
+                .read_frames(metadata.session_id, 512, None)
                 .expect("chunk should read");
             total_frames += chunk.frames;
             end_of_stream = chunk.end_of_stream;
         }
 
         assert!(total_frames >= 2048);
+    }
+
+    #[test]
+    fn successive_seeks_after_reads_keep_the_session_cursor_consistent() {
+        let temp_dir = TestDir::new("successive-seeks");
+        let wav_path = temp_dir.path().join("seek.wav");
+        write_test_wav(&wav_path, 44_100, 2, 44_100 * 2);
+
+        let manager = PlaybackSessionManager::default();
+        let metadata = manager
+            .open_session(&wav_path, 48_000, Some(2), None)
+            .expect("playback session should open");
+
+        let first_chunk = manager
+            .read_frames(metadata.session_id, 2_048, None)
+            .expect("initial frames should read");
+        assert_eq!(first_chunk.frames, 2_048);
+        assert!(first_chunk.current_time_seconds >= 0.04);
+
+        let first_seek = manager
+            .seek_session(metadata.session_id, 0.25, None)
+            .expect("first seek should succeed");
+        assert!(first_seek.current_time_seconds >= 0.24);
+        assert!(first_seek.current_time_seconds <= 0.26);
+
+        let after_first_seek = manager
+            .read_frames(metadata.session_id, 1_024, None)
+            .expect("frames after first seek should read");
+        assert_eq!(after_first_seek.frames, 1_024);
+        assert!(after_first_seek.current_time_seconds >= 0.27);
+
+        let second_seek = manager
+            .seek_session(metadata.session_id, 0.75, None)
+            .expect("second seek should succeed");
+        assert!(second_seek.current_time_seconds >= 0.74);
+        assert!(second_seek.current_time_seconds <= 0.76);
+
+        let after_second_seek = manager
+            .read_frames(metadata.session_id, 1_024, None)
+            .expect("frames after second seek should read");
+        assert_eq!(after_second_seek.frames, 1_024);
+        assert!(after_second_seek.current_time_seconds >= 0.77);
+
+        let third_seek = manager
+            .seek_session(metadata.session_id, 0.10, None)
+            .expect("third seek should succeed");
+        assert!(third_seek.current_time_seconds >= 0.09);
+        assert!(third_seek.current_time_seconds <= 0.11);
+
+        let after_third_seek = manager
+            .read_frames(metadata.session_id, 512, None)
+            .expect("frames after third seek should read");
+        assert_eq!(after_third_seek.frames, 512);
+        assert!(after_third_seek.current_time_seconds >= 0.11);
     }
 }

@@ -33,6 +33,20 @@ export interface PlaybackSeekResult {
   durationSeconds: number;
 }
 
+export interface PlaybackLogEntry {
+  timestampMs: number;
+  source: "frontend" | "native";
+  event: string;
+  level?: "debug" | "info" | "warn" | "error";
+  sessionId?: number | null;
+  operationToken?: number | null;
+  trackId?: string | null;
+  requestedSeconds?: number | null;
+  actualSeconds?: number | null;
+  durationMs?: number | null;
+  details?: Record<string, unknown> | null;
+}
+
 export async function pickMusicFolders() {
   const selection = await open({
     directory: true,
@@ -71,25 +85,29 @@ export async function openPlaybackSession(
   path: string,
   outputSampleRate: number,
   outputChannelCount = 2,
+  operationToken?: number,
 ) {
   return invoke<PlaybackSessionMetadata>("open_playback_session", {
     path,
     outputSampleRate,
     outputChannelCount,
+    operationToken,
   });
 }
 
-export async function readPlaybackFrames(sessionId: number, frameCount: number) {
+export async function readPlaybackFrames(sessionId: number, frameCount: number, operationToken?: number) {
   return invoke<PlaybackFrameChunk>("read_playback_frames", {
     sessionId,
     frameCount,
+    operationToken,
   });
 }
 
-export async function seekPlaybackSession(sessionId: number, seconds: number) {
+export async function seekPlaybackSession(sessionId: number, seconds: number, operationToken?: number) {
   return invoke<PlaybackSeekResult>("seek_playback_session", {
     sessionId,
     seconds,
+    operationToken,
   });
 }
 
@@ -97,6 +115,16 @@ export async function closePlaybackSession(sessionId: number) {
   return invoke<void>("close_playback_session", {
     sessionId,
   });
+}
+
+export async function appendPlaybackLogEntry(entry: PlaybackLogEntry) {
+  return invoke<void>("append_playback_log_entry", {
+    entry,
+  });
+}
+
+export async function getPlaybackLogPath() {
+  return invoke<string>("get_playback_log_path");
 }
 
 function shouldHandleWatchEvent(event: WatchEvent) {
