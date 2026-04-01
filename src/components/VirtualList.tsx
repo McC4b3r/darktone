@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
+type VirtualListScrollAlignment = "start" | "center" | "end";
+
 interface VirtualListProps<T> {
   items: T[];
   className?: string;
@@ -10,6 +12,9 @@ interface VirtualListProps<T> {
   getKey: (item: T, index: number) => string;
   getItemSize?: (item: T, index: number) => number;
   renderItem: (item: T, index: number) => ReactNode;
+  scrollToIndex?: number | null;
+  scrollRequestKey?: number | string | null;
+  scrollAlignment?: VirtualListScrollAlignment;
 }
 
 function findStartIndex(offsets: number[], sizes: number[], scrollTop: number) {
@@ -54,8 +59,12 @@ export function VirtualList<T>({
   getKey,
   getItemSize = () => 44,
   renderItem,
+  scrollToIndex = null,
+  scrollRequestKey = null,
+  scrollAlignment = "start",
 }: VirtualListProps<T>) {
   const containerRef = useRef<HTMLDivElement>(null);
+  const lastAppliedScrollRequestRef = useRef<number | string | null>(null);
   const [scrollTop, setScrollTop] = useState(0);
   const [viewportHeight, setViewportHeight] = useState(0);
 
@@ -99,6 +108,43 @@ export function VirtualList<T>({
       observer.disconnect();
     };
   }, [items.length]);
+
+  useEffect(() => {
+    const node = containerRef.current;
+    if (!node || scrollToIndex === null || scrollToIndex < 0 || scrollToIndex >= items.length || viewportHeight <= 0) {
+      return;
+    }
+
+    const requestKey = scrollRequestKey ?? scrollToIndex;
+    if (lastAppliedScrollRequestRef.current === requestKey) {
+      return;
+    }
+
+    const itemOffset = metrics.offsets[scrollToIndex] ?? 0;
+    const itemSize = metrics.sizes[scrollToIndex] ?? 0;
+    const maxScrollTop = Math.max(0, metrics.totalSize - viewportHeight);
+
+    let nextScrollTop = itemOffset;
+    if (scrollAlignment === "center") {
+      nextScrollTop = itemOffset - (viewportHeight - itemSize) / 2;
+    } else if (scrollAlignment === "end") {
+      nextScrollTop = itemOffset + itemSize - viewportHeight;
+    }
+
+    const clampedScrollTop = Math.max(0, Math.min(nextScrollTop, maxScrollTop));
+    node.scrollTop = clampedScrollTop;
+    setScrollTop(clampedScrollTop);
+    lastAppliedScrollRequestRef.current = requestKey;
+  }, [
+    items.length,
+    metrics.offsets,
+    metrics.sizes,
+    metrics.totalSize,
+    scrollAlignment,
+    scrollRequestKey,
+    scrollToIndex,
+    viewportHeight,
+  ]);
 
   const shouldVirtualize = items.length >= virtualizationThreshold && viewportHeight > 0;
 

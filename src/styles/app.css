@@ -380,6 +380,37 @@ button {
   white-space: nowrap;
 }
 
+.sidebar__search-control {
+  position: relative;
+}
+
+.sidebar__search-input {
+  padding-right: 40px;
+}
+
+.sidebar__search-clear {
+  position: absolute;
+  top: 50%;
+  right: 8px;
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border-radius: 999px;
+  border: 1px solid rgba(221, 199, 205, 0.12);
+  background: rgba(18, 22, 31, 0.94);
+  color: var(--muted);
+  transform: translateY(-50%);
+  transition: border-color 140ms ease, color 140ms ease, background 140ms ease;
+}
+
+.sidebar__search-clear:hover,
+.sidebar__search-clear:focus-visible {
+  border-color: var(--panel-border-strong);
+  color: var(--text);
+}
+
 .input,
 .button,
 .icon-button,

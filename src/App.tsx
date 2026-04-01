@@ -174,10 +174,11 @@ export default function App() {
         </div>
       ) : null}
 
-      <Sidebar
-        artists={artists}
-        selectedArtistId={selectedArtistId}
-        selectedAlbumId={selectedAlbumId}
+        <Sidebar
+          artists={artists}
+          activeArtistId={focusedArtist?.id ?? null}
+          selectedArtistId={selectedArtistId}
+          selectedAlbumId={selectedAlbumId}
         currentTrackId={currentTrack?.id ?? null}
         searchQuery={searchQuery}
         searchInputRef={searchInputRef}

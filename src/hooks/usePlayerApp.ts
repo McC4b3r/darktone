@@ -223,22 +223,20 @@ export function usePlayerApp() {
 
   const selectedArtist = artists.find((artist) => artist.id === selectedArtistId) ?? null;
   const focusedArtist = artists.find((artist) => artist.id === focusedArtistId) ?? null;
-  const visibleAlbums = selectedArtist ? selectedArtist.albums : allAlbums;
-  const selectedAlbum =
-    visibleAlbums.find((album) => album.id === selectedAlbumId) ??
-    (!selectedArtist ? visibleAlbums[0] : null) ??
-    null;
+  const activeArtist = selectedArtist ?? focusedArtist;
+  const visibleAlbums = activeArtist ? activeArtist.albums : allAlbums;
+  const selectedAlbum = activeArtist?.albums.find((album) => album.id === selectedAlbumId) ?? null;
 
   const visibleTracks =
     selectedAlbum?.tracks ??
-    (selectedArtist ? selectedArtist.albums.flatMap((artistAlbum) => artistAlbum.tracks) : filteredLibrary.tracks);
+    (activeArtist ? activeArtist.albums.flatMap((artistAlbum) => artistAlbum.tracks) : filteredLibrary.tracks);
   const queuedTrack = currentIndex >= 0 ? tracksById.get(queue[currentIndex]?.trackId ?? "") ?? null : null;
   const currentTrack =
     (playbackState.currentTrackId ? tracksById.get(playbackState.currentTrackId) ?? null : null) ?? queuedTrack;
   const currentAlbum =
     (currentTrack ? allAlbums.find((album) => album.tracks.some((track) => track.id === currentTrack.id)) ?? null : null) ??
     selectedAlbum ??
-    (selectedArtist?.albums[0] ?? null);
+    (activeArtist?.albums[0] ?? null);
   const playback = {
     ...playbackState,
     ...getPlaybackProgress(),
@@ -764,8 +762,10 @@ export function usePlayerApp() {
 
   function chooseArtist(artistId: string | null) {
     setSelectedArtistId(artistId);
-    setSelectedAlbumId(null);
     if (artistId) {
+      if (artistId !== focusedArtistId) {
+        setSelectedAlbumId(null);
+      }
       setFocusedArtistId(artistId);
     }
   }

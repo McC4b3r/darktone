@@ -251,7 +251,55 @@ describe("App", () => {
     });
   });
 
-  it("passes the selected album through when an artist is focused", async () => {
+  it("passes the selected album through when an artist is selected", async () => {
+    mockUsePlayerApp.mockReturnValue(
+      makePlayerState({
+        selectedArtist: artist,
+        focusedArtist: artist,
+        selectedAlbum: album,
+      }),
+    );
+    const { default: App } = await import("./App");
+    const container = document.createElement("div");
+    const root = ReactDOM.createRoot(container);
+
+    await act(async () => {
+      root.render(<App />);
+    });
+
+    expect(container.textContent).toContain("Library Stage:Berrymane:Eyes Red");
+
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
+  it("keeps the artist gallery visible when the explorer collapses the active artist", async () => {
+    mockUsePlayerApp.mockReturnValue(
+      makePlayerState({
+        selectedArtist: null,
+        focusedArtist: artist,
+        selectedAlbum: null,
+        currentAlbum: null,
+      }),
+    );
+    const { default: App } = await import("./App");
+    const container = document.createElement("div");
+    const root = ReactDOM.createRoot(container);
+
+    await act(async () => {
+      root.render(<App />);
+    });
+
+    expect(container.textContent).toContain("Library Stage:Berrymane:none");
+    expect(container.textContent).not.toContain("Signal Awaits");
+
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
+  it("keeps the selected album visible when the active artist is collapsed", async () => {
     mockUsePlayerApp.mockReturnValue(
       makePlayerState({
         selectedArtist: null,

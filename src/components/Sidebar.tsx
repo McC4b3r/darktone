@@ -1,10 +1,11 @@
 import { animated, useReducedMotion, useSpring } from "@react-spring/web";
-import type { RefObject } from "react";
+import { useEffect, useRef, useState, type RefObject } from "react";
 import type { ArtistGroup, Track } from "../lib/types";
 import { VirtualList } from "./VirtualList";
 
 interface SidebarProps {
   artists: ArtistGroup[];
+  activeArtistId: string | null;
   selectedArtistId: string | null;
   selectedAlbumId: string | null;
   currentTrackId: string | null;
@@ -23,6 +24,7 @@ interface SidebarProps {
 
 export function Sidebar({
   artists,
+  activeArtistId,
   selectedArtistId,
   selectedAlbumId,
   currentTrackId,
@@ -39,6 +41,9 @@ export function Sidebar({
   onFocusSearch,
 }: SidebarProps) {
   const reduceMotion = useReducedMotion();
+  const previousSearchQueryRef = useRef(searchQuery);
+  const scrollRequestKeyRef = useRef(0);
+  const [scrollRequest, setScrollRequest] = useState<{ index: number; key: number } | null>(null);
   const ARTIST_GROUP_ROW_HEIGHT = 44;
   const ALBUM_ROW_HEIGHT = 42;
   const TRACK_ROW_HEIGHT = 32;
@@ -62,6 +67,37 @@ export function Sidebar({
     },
     immediate: Boolean(reduceMotion),
   }), [collapsed, reduceMotion]);
+
+  useEffect(() => {
+    const previousSearchQuery = previousSearchQueryRef.current;
+    const didClearSearch = previousSearchQuery.trim().length > 0 && searchQuery.trim().length === 0;
+    previousSearchQueryRef.current = searchQuery;
+
+    if (!didClearSearch) {
+      return;
+    }
+
+    const anchorArtistId = selectedArtistId ?? activeArtistId;
+    if (!anchorArtistId) {
+      return;
+    }
+
+    const anchorArtistIndex = artists.findIndex((artist) => artist.id === anchorArtistId);
+    if (anchorArtistIndex === -1) {
+      return;
+    }
+
+    scrollRequestKeyRef.current += 1;
+    setScrollRequest({
+      index: anchorArtistIndex,
+      key: scrollRequestKeyRef.current,
+    });
+  }, [activeArtistId, artists, searchQuery, selectedArtistId]);
+
+  function clearSearch() {
+    onSearchChange("");
+    searchInputRef.current?.focus();
+  }
 
   return (
     <aside className={`sidebar panel ${collapsed ? "sidebar--collapsed" : ""}`}>
@@ -94,13 +130,26 @@ export function Sidebar({
           <div className="sidebar__section">
             <label className="field">
               <span className="field__label">Search</span>
-              <input
-                ref={searchInputRef}
-                className="input"
-                value={searchQuery}
-                onChange={(event) => onSearchChange(event.target.value)}
-                placeholder="Artist, album, or track"
-              />
+              <div className="sidebar__search-control">
+                <input
+                  ref={searchInputRef}
+                  className="input sidebar__search-input"
+                  value={searchQuery}
+                  onChange={(event) => onSearchChange(event.target.value)}
+                  placeholder="Artist, album, or track"
+                />
+                {searchQuery.trim() ? (
+                  <button
+                    type="button"
+                    className="sidebar__search-clear"
+                    aria-label="Clear search"
+                    onMouseDown={(event) => event.preventDefault()}
+                    onClick={clearSearch}
+                  >
+                    <span aria-hidden="true">x</span>
+                  </button>
+                ) : null}
+              </div>
             </label>
           </div>
 
@@ -126,6 +175,9 @@ export function Sidebar({
               itemClassName="artist-list__item"
               virtualizationThreshold={36}
               getKey={(artist) => artist.id}
+              scrollToIndex={scrollRequest?.index ?? null}
+              scrollRequestKey={scrollRequest?.key ?? null}
+              scrollAlignment="start"
               getItemSize={(artist) => {
                 let size = ARTIST_GROUP_ROW_HEIGHT + 6;
 
@@ -144,57 +196,69 @@ export function Sidebar({
 
                 return size;
               }}
-              renderItem={(artist) => (
-                <div className="artist-list__group">
-                  <button
-                    className={`nav-item ${selectedArtistId === artist.id ? "nav-item--active" : ""}`}
-                    onClick={() => {
-                      onSelectArtist(selectedArtistId === artist.id ? null : artist.id);
-                      onSelectAlbum(null);
-                    }}
-                  >
-                    <span>{artist.name}</span>
-                    <span className="nav-item__meta">{artist.albums.length}</span>
-                  </button>
+              renderItem={(artist) => {
+                const isExpanded = selectedArtistId === artist.id;
+                const isActive = activeArtistId === artist.id;
 
-                  {selectedArtistId === artist.id ? (
-                    <div className="artist-list__albums">
-                      {artist.albums.map((album) => (
-                        <div key={album.id} className="tree-node">
-                          <button
-                            className={`sub-nav-item ${selectedAlbumId === album.id ? "sub-nav-item--active" : ""}`}
-                            onClick={() => onSelectAlbum(selectedAlbumId === album.id ? null : album.id)}
-                          >
-                            <span className="tree-label">
-                              <span className="tree-caret">{selectedAlbumId === album.id ? "▾" : "▸"}</span>
-                              <span>{album.title}</span>
-                            </span>
-                            <span className="nav-item__meta">{album.trackCount}</span>
-                          </button>
+                return (
+                  <div className="artist-list__group">
+                    <button
+                      className={`nav-item ${isActive ? "nav-item--active" : ""}`}
+                      onClick={() => {
+                        if (isExpanded) {
+                          onSelectArtist(null);
+                          return;
+                        }
 
-                          {selectedAlbumId === album.id ? (
-                            <div className="tree-children">
-                              {album.tracks.map((track) => (
-                                <button
-                                  key={track.id}
-                                  className={`tree-leaf ${currentTrackId === track.id ? "tree-leaf--active" : ""}`}
-                                  onClick={() => onSelectTrack(track, album.tracks)}
-                                  title={track.title}
-                                >
-                                  <span className="tree-label">
-                                    <span className="tree-file-dot">♪</span>
-                                    <span className="tree-leaf__text">{track.title}</span>
-                                  </span>
-                                </button>
-                              ))}
-                            </div>
-                          ) : null}
-                        </div>
-                      ))}
-                    </div>
-                  ) : null}
-                </div>
-              )}
+                        onSelectArtist(artist.id);
+                        if (!isActive) {
+                          onSelectAlbum(null);
+                        }
+                      }}
+                    >
+                      <span>{artist.name}</span>
+                      <span className="nav-item__meta">{artist.albums.length}</span>
+                    </button>
+
+                    {isExpanded ? (
+                      <div className="artist-list__albums">
+                        {artist.albums.map((album) => (
+                          <div key={album.id} className="tree-node">
+                            <button
+                              className={`sub-nav-item ${selectedAlbumId === album.id ? "sub-nav-item--active" : ""}`}
+                              onClick={() => onSelectAlbum(selectedAlbumId === album.id ? null : album.id)}
+                            >
+                              <span className="tree-label">
+                                <span className="tree-caret">{selectedAlbumId === album.id ? "▾" : "▸"}</span>
+                                <span>{album.title}</span>
+                              </span>
+                              <span className="nav-item__meta">{album.trackCount}</span>
+                            </button>
+
+                            {selectedAlbumId === album.id ? (
+                              <div className="tree-children">
+                                {album.tracks.map((track) => (
+                                  <button
+                                    key={track.id}
+                                    className={`tree-leaf ${currentTrackId === track.id ? "tree-leaf--active" : ""}`}
+                                    onClick={() => onSelectTrack(track, album.tracks)}
+                                    title={track.title}
+                                  >
+                                    <span className="tree-label">
+                                      <span className="tree-file-dot">♪</span>
+                                      <span className="tree-leaf__text">{track.title}</span>
+                                    </span>
+                                  </button>
+                                ))}
+                              </div>
+                            ) : null}
+                          </div>
+                        ))}
+                      </div>
+                    ) : null}
+                  </div>
+                );
+              }}
             />
           </div>
         </animated.div>
