@@ -146,7 +146,7 @@ export function Sidebar({
                     onMouseDown={(event) => event.preventDefault()}
                     onClick={clearSearch}
                   >
-                    <span aria-hidden="true">x</span>
+                    <span aria-hidden="true">&times;</span>
                   </button>
                 ) : null}
               </div>
