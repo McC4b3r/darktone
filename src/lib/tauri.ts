@@ -78,6 +78,7 @@ export interface PlaybackSmokeTrackResult {
 export interface PlaybackSmokeReport {
   passed: boolean;
   failures: string[];
+  warnings: string[];
   tracks: PlaybackSmokeTrackResult[];
   transportMode: PlaybackTransportMode;
   statusTransitions: string[];

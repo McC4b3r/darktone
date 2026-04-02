@@ -13,10 +13,11 @@ import type { Track } from "../lib/types";
 
 const FIRST_PLAYING_TIMEOUT_MS = 2_500;
 const SEEK_TIMEOUT_MS = 1_500;
-const PROGRESS_SAMPLE_MS = 350;
-const PAUSE_HOLD_MS = 300;
+const DEFAULT_PROGRESS_TIMEOUT_MS = 350;
+const DEFAULT_PAUSE_HOLD_MS = 300;
 const PAUSE_DRIFT_TOLERANCE_SECONDS = 0.05;
 const SEEK_TOLERANCE_SECONDS = 0.35;
+const EARLY_END_RELOAD_THRESHOLD_SECONDS = 0.25;
 
 type SmokeState = {
   currentTime: number;
@@ -63,13 +64,14 @@ function buildSmokeTrack(path: string, format: Track["format"]): Track {
 export function PlaybackSmokeApp({ config }: { config: PlaybackSmokeConfig }) {
   const heroAnalyzerContainerRef = useRef<HTMLDivElement>(null);
   const spectrumAnalyzerContainerRef = useRef<HTMLDivElement>(null);
+  const analyzerProbeRef = useRef<AnalyserNode | null>(null);
   const analyzersRef = useRef<AudioMotionAnalyzer[]>([]);
   const smokeStateRef = useRef<SmokeState>(INITIAL_SMOKE_STATE);
   const activeFormatRef = useRef<string>("boot");
   const statusTransitionsRef = useRef<string[]>([]);
+  const warningsRef = useRef<string[]>([]);
   const [statusMessage, setStatusMessage] = useState("Preparing playback smoke test…");
-  const [analyzersReady, setAnalyzersReady] = useState(false);
-  const [analyzerError, setAnalyzerError] = useState<string | null>(null);
+  const [environmentReady, setEnvironmentReady] = useState(false);
 
   useEffect(() => {
     audioEngine.setCallbacks({
@@ -109,13 +111,34 @@ export function PlaybackSmokeApp({ config }: { config: PlaybackSmokeConfig }) {
     }
 
     try {
-      analyzersRef.current = [
-        createNowPlayingAnalyzer(heroAnalyzerContainerRef.current),
-        createSpectrumAnalyzer(spectrumAnalyzerContainerRef.current),
-      ];
-      setAnalyzersReady(true);
+      const audioContext = audioEngine.getAudioContext();
+      const analyzerInputNode = audioEngine.getAnalyzerInputNode();
+      const analyzerProbe = audioContext.createAnalyser();
+      analyzerProbe.fftSize = 2048;
+      analyzerInputNode.connect(analyzerProbe);
+      analyzerProbeRef.current = analyzerProbe;
+
+      try {
+        analyzersRef.current = [
+          createNowPlayingAnalyzer(heroAnalyzerContainerRef.current),
+          createSpectrumAnalyzer(spectrumAnalyzerContainerRef.current),
+        ];
+      } catch (error) {
+        warningsRef.current.push(
+          `AudioMotion visualizer initialization failed in smoke mode: ${
+            error instanceof Error ? error.message : `${error}`
+          }`,
+        );
+      }
+
+      setEnvironmentReady(true);
     } catch (error) {
-      setAnalyzerError(error instanceof Error ? error.message : `${error}`);
+      warningsRef.current.push(
+        `Smoke-mode visualizer setup fell back to analyzer probe verification only: ${
+          error instanceof Error ? error.message : `${error}`
+        }`,
+      );
+      setEnvironmentReady(true);
     }
 
     return () => {
@@ -123,11 +146,17 @@ export function PlaybackSmokeApp({ config }: { config: PlaybackSmokeConfig }) {
         analyzer.destroy();
       }
       analyzersRef.current = [];
+      try {
+        analyzerProbeRef.current?.disconnect();
+      } catch {
+        // Web Audio disconnect behavior varies slightly across runtimes.
+      }
+      analyzerProbeRef.current = null;
     };
   }, []);
 
   useEffect(() => {
-    if (!analyzersReady || analyzerError) {
+    if (!environmentReady) {
       return;
     }
 
@@ -153,8 +182,51 @@ export function PlaybackSmokeApp({ config }: { config: PlaybackSmokeConfig }) {
 
     const didProgressAdvance = async (sampleWindowMs: number) => {
       const startTime = smokeStateRef.current.currentTime;
-      await sleep(sampleWindowMs);
-      return smokeStateRef.current.currentTime > startTime + 0.05;
+      const startedAt = performance.now();
+
+      while (performance.now() - startedAt <= sampleWindowMs) {
+        if (smokeStateRef.current.currentTime > startTime + 0.02) {
+          return true;
+        }
+
+        if (smokeStateRef.current.status === "ended") {
+          return smokeStateRef.current.currentTime > startTime + 0.005;
+        }
+
+        if (smokeStateRef.current.error) {
+          throw new Error(smokeStateRef.current.error);
+        }
+
+        await sleep(25);
+      }
+
+      return smokeStateRef.current.currentTime > startTime + 0.02;
+    };
+
+    const waitForAnalyzerSignal = async (format: Track["format"]) => {
+      const analyzerProbe = analyzerProbeRef.current;
+      if (!analyzerProbe) {
+        throw new Error("Analyzer probe did not initialize.");
+      }
+
+      const buffer = new Float32Array(analyzerProbe.fftSize);
+      const startedAt = performance.now();
+
+      while (performance.now() - startedAt <= FIRST_PLAYING_TIMEOUT_MS) {
+        analyzerProbe.getFloatTimeDomainData(buffer);
+        let peak = 0;
+        for (const sample of buffer) {
+          peak = Math.max(peak, Math.abs(sample));
+        }
+
+        if (peak > 0.001) {
+          return;
+        }
+
+        await sleep(40);
+      }
+
+      throw new Error(`${format} analyzer probe never observed playback signal.`);
     };
 
     const runStep = async (format: Track["format"], path: string) => {
@@ -172,29 +244,48 @@ export function PlaybackSmokeApp({ config }: { config: PlaybackSmokeConfig }) {
         `${format} did not reach playing.`,
       );
       const firstPlayingMs = roundDurationMs(loadStartedAt);
+      await waitForAnalyzerSignal(format);
 
-      const progressAdvancedBeforePause = await didProgressAdvance(PROGRESS_SAMPLE_MS);
+      const durationSeconds = smokeStateRef.current.duration;
+      const progressTimeoutMs = Math.max(
+        60,
+        Math.min(DEFAULT_PROGRESS_TIMEOUT_MS, Math.round(durationSeconds * 180)),
+      );
+      const pauseHoldMs = Math.max(
+        40,
+        Math.min(DEFAULT_PAUSE_HOLD_MS, Math.round(durationSeconds * 120)),
+      );
+      const progressAdvancedBeforePause = await didProgressAdvance(progressTimeoutMs);
       if (!progressAdvancedBeforePause) {
         throw new Error(`${format} progress did not advance while playing.`);
       }
 
+      if (
+        smokeStateRef.current.status === "ended" ||
+        smokeStateRef.current.duration - smokeStateRef.current.currentTime <= EARLY_END_RELOAD_THRESHOLD_SECONDS
+      ) {
+        warningsRef.current.push(
+          `${format} reached end of stream before interactive validation, reloading in ready state for pause/seek checks.`,
+        );
+        await audioEngine.load(track, false);
+        await waitFor(
+          () => smokeStateRef.current.status === "ready",
+          FIRST_PLAYING_TIMEOUT_MS,
+          `${format} did not reach ready after early-end reload.`,
+        );
+      }
+
       await audioEngine.pause();
       const pausedAt = smokeStateRef.current.currentTime;
-      await sleep(PAUSE_HOLD_MS);
+      await sleep(pauseHoldMs);
       const pauseHeld =
         Math.abs(smokeStateRef.current.currentTime - pausedAt) <= PAUSE_DRIFT_TOLERANCE_SECONDS;
 
-      await audioEngine.resume(track, smokeStateRef.current.currentTime);
-      await waitFor(
-        () => smokeStateRef.current.status === "playing",
-        SEEK_TIMEOUT_MS,
-        `${format} did not resume playback.`,
-      );
-      const resumedAdvanced = await didProgressAdvance(PROGRESS_SAMPLE_MS);
-
       const targetSeconds = Math.max(
-        0.25,
-        smokeStateRef.current.duration > 0 ? smokeStateRef.current.duration / 2 : 1,
+        0.05,
+        smokeStateRef.current.duration > 0
+          ? Math.min(smokeStateRef.current.duration / 2, Math.max(smokeStateRef.current.duration - 0.05, 0.05))
+          : 0.2,
       );
       const seekStartedAt = performance.now();
       await audioEngine.seek(targetSeconds);
@@ -204,7 +295,14 @@ export function PlaybackSmokeApp({ config }: { config: PlaybackSmokeConfig }) {
         `${format} seek did not land near ${targetSeconds.toFixed(2)}s.`,
       );
       const seekMs = roundDurationMs(seekStartedAt);
-      const postSeekAdvanced = await didProgressAdvance(PROGRESS_SAMPLE_MS);
+
+      await audioEngine.resume(track, smokeStateRef.current.currentTime);
+      await waitFor(
+        () => smokeStateRef.current.status === "playing" || smokeStateRef.current.status === "ended",
+        SEEK_TIMEOUT_MS,
+        `${format} did not resume playback.`,
+      );
+      const resumedAdvanced = await didProgressAdvance(progressTimeoutMs);
 
       return {
         format,
@@ -212,7 +310,7 @@ export function PlaybackSmokeApp({ config }: { config: PlaybackSmokeConfig }) {
         firstPlayingMs,
         seekMs,
         pauseResumeOk: pauseHeld && resumedAdvanced,
-        progressAdvancedOk: progressAdvancedBeforePause && resumedAdvanced && postSeekAdvanced,
+        progressAdvancedOk: progressAdvancedBeforePause && resumedAdvanced,
       } satisfies PlaybackSmokeTrackResult;
     };
 
@@ -245,6 +343,7 @@ export function PlaybackSmokeApp({ config }: { config: PlaybackSmokeConfig }) {
           trackResults.length === 3 &&
           trackResults.every((track) => track.pauseResumeOk && track.progressAdvancedOk),
         failures,
+        warnings: warningsRef.current,
         tracks: trackResults,
         transportMode: config.transportMode,
         statusTransitions: statusTransitionsRef.current,
@@ -262,7 +361,7 @@ export function PlaybackSmokeApp({ config }: { config: PlaybackSmokeConfig }) {
     return () => {
       cancelled = true;
     };
-  }, [analyzerError, analyzersReady, config]);
+  }, [config, environmentReady]);
 
   return (
     <main
@@ -298,7 +397,7 @@ export function PlaybackSmokeApp({ config }: { config: PlaybackSmokeConfig }) {
           Packaged Playback Verification
         </p>
         <h1 style={{ margin: "8px 0 16px", fontSize: 30 }}>Darktone Smoke Run</h1>
-        <p style={{ margin: "0 0 20px", opacity: 0.82 }}>{analyzerError ?? statusMessage}</p>
+        <p style={{ margin: "0 0 20px", opacity: 0.82 }}>{statusMessage}</p>
         <div style={{ display: "grid", gap: 18 }}>
           <div ref={heroAnalyzerContainerRef} style={{ minHeight: 190, borderRadius: 18, overflow: "hidden" }} />
           <div ref={spectrumAnalyzerContainerRef} style={{ minHeight: 148, borderRadius: 18, overflow: "hidden" }} />

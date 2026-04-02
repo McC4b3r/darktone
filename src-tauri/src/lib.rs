@@ -97,6 +97,8 @@ struct PlaybackSmokeTrackResult {
 struct PlaybackSmokeReport {
     passed: bool,
     failures: Vec<String>,
+    #[serde(default)]
+    warnings: Vec<String>,
     tracks: Vec<PlaybackSmokeTrackResult>,
     transport_mode: PlaybackTransportMode,
     status_transitions: Vec<String>,
@@ -1980,6 +1982,7 @@ mod tests {
         let report = PlaybackSmokeReport {
             passed: true,
             failures: Vec::new(),
+            warnings: Vec::new(),
             tracks: vec![PlaybackSmokeTrackResult {
                 format: "wav".into(),
                 open_ms: 100,

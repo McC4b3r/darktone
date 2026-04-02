@@ -54,17 +54,28 @@ jobs:
           }
 
           $process = Start-Process -FilePath $exePath -Wait -PassThru -NoNewWindow
-          if ($process.ExitCode -ne 0) {
-            throw "Playback smoke executable exited with code $($process.ExitCode)"
-          }
+          $smokeFailure = $null
 
           if (-not (Test-Path $env:DARKTONE_PLAYBACK_SMOKE_REPORT)) {
-            throw "Playback smoke report was not created."
+            $smokeFailure = "Playback smoke report was not created."
+          } else {
+            Write-Host "Playback smoke report:"
+            Get-Content $env:DARKTONE_PLAYBACK_SMOKE_REPORT -Raw | Write-Host
+
+            $report = Get-Content $env:DARKTONE_PLAYBACK_SMOKE_REPORT -Raw | ConvertFrom-Json
+            if (-not $report.passed) {
+              $failureSummary = if ($report.failures) { ($report.failures -join "; ") } else { "Unknown smoke failure." }
+              $warningSummary = if ($report.warnings) { ($report.warnings -join "; ") } else { "" }
+              $smokeFailure = "Playback smoke report marked the run as failed. Failures: $failureSummary Warnings: $warningSummary"
+            }
           }
 
-          $report = Get-Content $env:DARKTONE_PLAYBACK_SMOKE_REPORT -Raw | ConvertFrom-Json
-          if (-not $report.passed) {
-            throw "Playback smoke report marked the run as failed."
+          if ($process.ExitCode -ne 0 -and -not $smokeFailure) {
+            $smokeFailure = "Playback smoke executable exited with code $($process.ExitCode)"
+          }
+
+          if ($smokeFailure) {
+            throw $smokeFailure
           }
 
       - name: Upload playback smoke report
