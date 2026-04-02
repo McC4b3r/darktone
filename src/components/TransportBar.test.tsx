@@ -48,11 +48,8 @@ describe("TransportBar", () => {
     }
 
     await act(async () => {
-      Simulate.change(timeline, {
-        target: {
-          value: "60",
-        },
-      });
+      timeline.value = "60";
+      Simulate.change(timeline);
     });
 
     expect(onSeek).not.toHaveBeenCalled();
