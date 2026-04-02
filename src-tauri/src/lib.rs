@@ -8,6 +8,7 @@ use std::{
     collections::hash_map::DefaultHasher,
     collections::HashMap,
     collections::HashSet,
+    env,
     fs,
     fs::File,
     fs::OpenOptions,
@@ -33,12 +34,14 @@ use symphonia::{
 use tauri::{
     http::{header, Method, Request, Response, StatusCode},
     menu::{Menu, MenuItem, PredefinedMenuItem, Submenu},
+    path::BaseDirectory,
     AppHandle, Emitter, Manager, State,
 };
 use walkdir::WalkDir;
 
 use playback::{
-    PlaybackFrameChunk, PlaybackSeekResult, PlaybackSessionManager, PlaybackSessionMetadata,
+    PlaybackFrameChunk, PlaybackFrameChunkMeta, PlaybackSeekResult, PlaybackSessionManager,
+    PlaybackSessionMetadata,
 };
 
 const LIBRARY_FILE: &str = "library.json";
@@ -51,6 +54,60 @@ const PLAYBACK_MAX_RANGE_LEN: u64 = 1000 * 1024;
 const PLAYBACK_LOG_FILE: &str = "playback.log";
 const PLAYBACK_LOG_ARCHIVE_FILE: &str = "playback.log.1";
 const PLAYBACK_LOG_MAX_BYTES: u64 = 512 * 1024;
+const PLAYBACK_SMOKE_ENV: &str = "DARKTONE_PLAYBACK_SMOKE";
+const PLAYBACK_SMOKE_REPORT_ENV: &str = "DARKTONE_PLAYBACK_SMOKE_REPORT";
+const PLAYBACK_TRANSPORT_ENV: &str = "DARKTONE_PLAYBACK_TRANSPORT";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum PlaybackTransportMode {
+    Legacy,
+    RawChannel,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PlaybackSmokeFixturePaths {
+    wav: String,
+    mp3: String,
+    flac: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PlaybackSmokeConfig {
+    report_path: String,
+    fixture_paths: PlaybackSmokeFixturePaths,
+    transport_mode: PlaybackTransportMode,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PlaybackSmokeTrackResult {
+    format: String,
+    open_ms: u64,
+    first_playing_ms: u64,
+    seek_ms: u64,
+    pause_resume_ok: bool,
+    progress_advanced_ok: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PlaybackSmokeReport {
+    passed: bool,
+    failures: Vec<String>,
+    tracks: Vec<PlaybackSmokeTrackResult>,
+    transport_mode: PlaybackTransportMode,
+    status_transitions: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+enum RuntimeMode {
+    Normal,
+    PlaybackSmoke { config: PlaybackSmokeConfig },
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -219,6 +276,8 @@ struct Track {
     duration_ms: u64,
     format: String,
     modified_at: u64,
+    #[serde(default)]
+    file_size: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -308,6 +367,7 @@ struct AlbumArtCacheEntry {
 }
 
 type AlbumArtCache = HashMap<PathBuf, AlbumArtCacheEntry>;
+type TrackReuseCache = HashMap<PathBuf, Track>;
 
 fn app_data_dir(app: &AppHandle) -> Result<PathBuf, String> {
     let path = app
@@ -331,8 +391,29 @@ fn write_json<T>(path: &Path, value: &T) -> Result<(), String>
 where
     T: Serialize,
 {
-    let content = serde_json::to_string_pretty(value).map_err(|error| error.to_string())?;
-    fs::write(path, content).map_err(|error| error.to_string())
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+
+    let content = serde_json::to_vec(value).map_err(|error| error.to_string())?;
+    let extension = path.extension().and_then(|value| value.to_str()).unwrap_or("json");
+    let temporary_path =
+        path.with_extension(format!("{extension}.tmp-{}", current_timestamp_ms()));
+    let mut file = File::create(&temporary_path).map_err(|error| error.to_string())?;
+    file.write_all(&content).map_err(|error| error.to_string())?;
+    file.sync_all().map_err(|error| error.to_string())?;
+
+    match fs::rename(&temporary_path, path) {
+        Ok(()) => Ok(()),
+        Err(error) if path.exists() => {
+            fs::remove_file(path).map_err(|remove_error| remove_error.to_string())?;
+            fs::rename(&temporary_path, path).map_err(|_| error.to_string())
+        }
+        Err(error) => {
+            let _ = fs::remove_file(&temporary_path);
+            Err(error.to_string())
+        }
+    }
 }
 
 fn library_path(app: &AppHandle) -> Result<PathBuf, String> {
@@ -371,6 +452,10 @@ fn path_modified_at(path: &Path) -> Option<u64> {
         .duration_since(UNIX_EPOCH)
         .ok()
         .map(|duration| duration.as_millis() as u64)
+}
+
+fn path_file_size(path: &Path) -> Option<u64> {
+    fs::metadata(path).ok().map(|metadata| metadata.len())
 }
 
 fn supported_file(path: &Path) -> bool {
@@ -546,6 +631,7 @@ fn fallback_track(path: &Path, album_art_cache: &mut AlbumArtCache) -> Result<Tr
         duration_ms: 0,
         format: format_name,
         modified_at,
+        file_size: path_file_size(path),
     })
 }
 
@@ -592,6 +678,107 @@ fn inspect_audio_file(path: &Path, album_art_cache: &mut AlbumArtCache) -> Resul
 
     let _ = get_codecs();
     Ok(track)
+}
+
+fn build_track_reuse_cache(existing_tracks: &[Track]) -> TrackReuseCache {
+    let mut cache = TrackReuseCache::new();
+
+    for track in existing_tracks {
+        let path = PathBuf::from(&track.path);
+        let key = fs::canonicalize(&path).unwrap_or(path);
+        cache.insert(key, track.clone());
+    }
+
+    cache
+}
+
+fn reuse_cached_track(
+    path: &Path,
+    track_reuse_cache: &TrackReuseCache,
+    album_art_cache: &mut AlbumArtCache,
+) -> Option<Track> {
+    let cache_key = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let cached_track = track_reuse_cache.get(&cache_key)?;
+    let modified_at = path_modified_at(path)?;
+    let file_size = path_file_size(path);
+
+    if cached_track.modified_at != modified_at || cached_track.file_size != file_size {
+        return None;
+    }
+
+    let mut reused_track = cached_track.clone();
+    reused_track.art_path = find_album_art(path, album_art_cache);
+    Some(reused_track)
+}
+
+fn inspect_track_with_reuse(
+    path: &Path,
+    album_art_cache: &mut AlbumArtCache,
+    track_reuse_cache: &TrackReuseCache,
+) -> Result<Track, String> {
+    if let Some(track) = reuse_cached_track(path, track_reuse_cache, album_art_cache) {
+        return Ok(track);
+    }
+
+    inspect_track_with_fallback(path, album_art_cache)
+}
+
+fn playback_smoke_enabled() -> bool {
+    env::var(PLAYBACK_SMOKE_ENV)
+        .ok()
+        .as_deref()
+        .map(|value| value == "1")
+        .unwrap_or(false)
+}
+
+fn playback_smoke_report_path() -> Result<PathBuf, String> {
+    env::var(PLAYBACK_SMOKE_REPORT_ENV)
+        .map(PathBuf::from)
+        .map_err(|_| format!("{PLAYBACK_SMOKE_REPORT_ENV} must be set when playback smoke mode is enabled."))
+}
+
+fn playback_transport_mode() -> PlaybackTransportMode {
+    match env::var(PLAYBACK_TRANSPORT_ENV).ok().as_deref() {
+        Some("raw-channel") => PlaybackTransportMode::RawChannel,
+        _ => PlaybackTransportMode::Legacy,
+    }
+}
+
+fn resolve_playback_smoke_fixture_path(app: &AppHandle, file_name: &str) -> Result<String, String> {
+    let resource_path = app
+        .path()
+        .resolve(format!("playback-smoke/{file_name}"), BaseDirectory::Resource)
+        .map_err(|error| error.to_string())?;
+    if resource_path.exists() {
+        return Ok(resource_path.to_string_lossy().into_owned());
+    }
+
+    let dev_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../fixtures/playback-smoke")
+        .join(file_name);
+    if dev_path.exists() {
+        return Ok(dev_path.to_string_lossy().into_owned());
+    }
+
+    Err(format!("Playback smoke fixture {file_name} could not be resolved."))
+}
+
+fn runtime_mode(app: &AppHandle) -> Result<RuntimeMode, String> {
+    if !playback_smoke_enabled() {
+        return Ok(RuntimeMode::Normal);
+    }
+
+    Ok(RuntimeMode::PlaybackSmoke {
+        config: PlaybackSmokeConfig {
+            report_path: playback_smoke_report_path()?.to_string_lossy().into_owned(),
+            fixture_paths: PlaybackSmokeFixturePaths {
+                wav: resolve_playback_smoke_fixture_path(app, "smoke.wav")?,
+                mp3: resolve_playback_smoke_fixture_path(app, "smoke.mp3")?,
+                flac: resolve_playback_smoke_fixture_path(app, "smoke.flac")?,
+            },
+            transport_mode: playback_transport_mode(),
+        },
+    })
 }
 
 fn build_wav_header(
@@ -1122,6 +1309,7 @@ fn scan_sync_file(
     seen_paths: &mut HashSet<PathBuf>,
     synced_tracks: &mut HashMap<String, Track>,
     album_art_cache: &mut AlbumArtCache,
+    track_reuse_cache: &TrackReuseCache,
     scanned_files: &mut usize,
     unreadable_audio_files: &mut usize,
 ) {
@@ -1134,7 +1322,7 @@ fn scan_sync_file(
         return;
     }
 
-    match inspect_track_with_fallback(path, album_art_cache) {
+    match inspect_track_with_reuse(path, album_art_cache, track_reuse_cache) {
         Ok(track) => {
             *scanned_files += 1;
             synced_tracks.insert(track.path.clone(), track);
@@ -1150,6 +1338,7 @@ fn scan_sync_directory(
     seen_paths: &mut HashSet<PathBuf>,
     synced_tracks: &mut HashMap<String, Track>,
     album_art_cache: &mut AlbumArtCache,
+    track_reuse_cache: &TrackReuseCache,
     scanned_files: &mut usize,
     unreadable_entries: &mut usize,
     unreadable_audio_files: &mut usize,
@@ -1176,6 +1365,7 @@ fn scan_sync_directory(
             seen_paths,
             synced_tracks,
             album_art_cache,
+            track_reuse_cache,
             scanned_files,
             unreadable_audio_files,
         );
@@ -1184,12 +1374,14 @@ fn scan_sync_directory(
 
 #[tauri::command]
 async fn scan_library(app: AppHandle, folders: Vec<String>) -> Result<LibraryScanResult, String> {
+    let existing_library = load_library_or_default(&app)?;
     let progress_app = app.clone();
     let output = tauri::async_runtime::spawn_blocking(move || {
         let mut tracks = Vec::new();
         let mut candidate_files = Vec::new();
         let mut seen_paths = HashSet::new();
         let mut album_art_cache = AlbumArtCache::new();
+        let track_reuse_cache = build_track_reuse_cache(&existing_library.tracks);
         let mut scanned_files = 0usize;
         let mut skipped_files = 0usize;
         let mut unsupported_files = 0usize;
@@ -1275,21 +1467,15 @@ async fn scan_library(app: AppHandle, folders: Vec<String>) -> Result<LibrarySca
         last_progress_emit = Instant::now();
 
         for (index, path) in candidate_files.into_iter().enumerate() {
-            match inspect_audio_file(&path, &mut album_art_cache) {
+            match inspect_track_with_reuse(&path, &mut album_art_cache, &track_reuse_cache) {
                 Ok(track) => {
                     scanned_files += 1;
                     tracks.push(track);
                 }
-                Err(_) => match fallback_track(&path, &mut album_art_cache) {
-                    Ok(track) => {
-                        scanned_files += 1;
-                        tracks.push(track);
-                    }
-                    Err(_) => {
-                        skipped_files += 1;
-                        unreadable_audio_files += 1;
-                    }
-                },
+                Err(_) => {
+                    skipped_files += 1;
+                    unreadable_audio_files += 1;
+                }
             }
 
             let processed = index + 1;
@@ -1346,6 +1532,7 @@ async fn sync_library_changes(
 ) -> Result<LibrarySyncResult, String> {
     let existing_library = load_library_or_default(&app)?;
     let output = tauri::async_runtime::spawn_blocking(move || {
+        let track_reuse_cache = build_track_reuse_cache(&existing_library.tracks);
         let targets = collect_sync_targets(&changed_paths, &existing_library.tracks);
 
         if targets.is_empty() {
@@ -1395,6 +1582,7 @@ async fn sync_library_changes(
                     &mut seen_paths,
                     &mut synced_tracks,
                     &mut album_art_cache,
+                    &track_reuse_cache,
                     &mut scanned_files,
                     &mut unreadable_audio_files,
                 ),
@@ -1403,6 +1591,7 @@ async fn sync_library_changes(
                     &mut seen_paths,
                     &mut synced_tracks,
                     &mut album_art_cache,
+                    &track_reuse_cache,
                     &mut scanned_files,
                     &mut unreadable_entries,
                     &mut unreadable_audio_files,
@@ -1510,6 +1699,27 @@ async fn read_playback_frames(
 }
 
 #[tauri::command]
+async fn read_playback_frames_v2(
+    playback_sessions: State<'_, PlaybackSessionManager>,
+    session_id: u64,
+    frame_count: usize,
+    on_samples_channel: tauri::ipc::Channel<Vec<u8>>,
+    operation_token: Option<u64>,
+) -> Result<PlaybackFrameChunkMeta, String> {
+    let manager = playback_sessions.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        manager.read_frames_v2(
+            session_id,
+            frame_count,
+            on_samples_channel,
+            operation_token,
+        )
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
 async fn seek_playback_session(
     playback_sessions: State<'_, PlaybackSessionManager>,
     session_id: u64,
@@ -1553,6 +1763,22 @@ fn get_playback_log_path(
     playback_diagnostics.log_path_string()
 }
 
+#[tauri::command]
+fn get_runtime_mode(app: AppHandle) -> Result<RuntimeMode, String> {
+    runtime_mode(&app)
+}
+
+#[tauri::command]
+fn write_playback_smoke_report(report: PlaybackSmokeReport) -> Result<(), String> {
+    write_json(&playback_smoke_report_path()?, &report)
+}
+
+#[tauri::command]
+fn exit_app(app: AppHandle, exit_code: i32) -> Result<(), String> {
+    app.exit(exit_code);
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -1592,10 +1818,14 @@ pub fn run() {
             read_prepared_playback_audio_bytes,
             open_playback_session,
             read_playback_frames,
+            read_playback_frames_v2,
             seek_playback_session,
             close_playback_session,
             append_playback_log_entry,
-            get_playback_log_path
+            get_playback_log_path,
+            get_runtime_mode,
+            write_playback_smoke_report,
+            exit_app
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -1604,7 +1834,9 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::{
-        decode_playback_request_path, encode_wav_from_pcm_i16, find_album_art, AlbumArtCache,
+        decode_playback_request_path, encode_wav_from_pcm_i16, find_album_art,
+        reuse_cached_track, write_json, AlbumArtCache, PlaybackSmokeReport,
+        PlaybackSmokeTrackResult, PlaybackTransportMode, Track, TrackReuseCache,
     };
     use std::{
         fs,
@@ -1739,5 +1971,76 @@ mod tests {
         let decoded = decode_playback_request_path(&request).expect("playback path should decode");
 
         assert_eq!(decoded, PathBuf::from(r"C:\Music\Artist\Track.mp3"));
+    }
+
+    #[test]
+    fn compact_json_write_avoids_pretty_printing() {
+        let temp_dir = TestDir::new("compact-json");
+        let report_path = temp_dir.path().join("playback-smoke-report.json");
+        let report = PlaybackSmokeReport {
+            passed: true,
+            failures: Vec::new(),
+            tracks: vec![PlaybackSmokeTrackResult {
+                format: "wav".into(),
+                open_ms: 100,
+                first_playing_ms: 100,
+                seek_ms: 120,
+                pause_resume_ok: true,
+                progress_advanced_ok: true,
+            }],
+            transport_mode: PlaybackTransportMode::Legacy,
+            status_transitions: vec!["wav:playing".into()],
+        };
+
+        write_json(&report_path, &report).expect("compact report should write");
+        let written = fs::read_to_string(&report_path).expect("report should be readable");
+
+        assert!(!written.contains("\n  "));
+        assert!(written.contains("\"passed\":true"));
+    }
+
+    #[test]
+    fn reuses_cached_track_metadata_for_unchanged_files() {
+        let temp_dir = TestDir::new("track-reuse");
+        let track_path = temp_dir.path().join("artist/album/song.flac");
+        write_test_file(&track_path);
+        let modified_at = fs::metadata(&track_path)
+            .expect("track should exist")
+            .modified()
+            .expect("track modified time should be readable")
+            .duration_since(UNIX_EPOCH)
+            .expect("track modified time should be after unix epoch")
+            .as_millis() as u64;
+        let file_size = fs::metadata(&track_path)
+            .expect("track should exist")
+            .len();
+        let track_key = fs::canonicalize(&track_path).expect("track should canonicalize");
+
+        let mut reuse_cache = TrackReuseCache::new();
+        reuse_cache.insert(
+            track_key,
+            Track {
+                id: track_path.to_string_lossy().to_string(),
+                path: track_path.to_string_lossy().to_string(),
+                art_path: None,
+                filename: "song.flac".into(),
+                title: "Dialed In".into(),
+                artist: "Darktone".into(),
+                album: "Signals".into(),
+                release_year: Some(2026),
+                track_number: Some(1),
+                duration_ms: 123_000,
+                format: "flac".into(),
+                modified_at,
+                file_size: Some(file_size),
+            },
+        );
+
+        let reused = reuse_cached_track(&track_path, &reuse_cache, &mut AlbumArtCache::new())
+            .expect("unchanged track should reuse cached metadata");
+
+        assert_eq!(reused.title, "Dialed In");
+        assert_eq!(reused.duration_ms, 123_000);
+        assert_eq!(reused.file_size, Some(file_size));
     }
 }

@@ -10,6 +10,7 @@ use std::{
     },
     time::Instant,
 };
+use tauri::ipc::Channel;
 use symphonia::{
     core::{
         audio::SampleBuffer,
@@ -44,6 +45,18 @@ pub struct PlaybackFrameChunk {
     pub channel_count: u16,
     pub frames: usize,
     pub samples: Vec<f32>,
+    pub end_of_stream: bool,
+    pub current_time_seconds: f64,
+    pub duration_seconds: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlaybackFrameChunkMeta {
+    pub session_id: u64,
+    pub sample_rate: u32,
+    pub channel_count: u16,
+    pub frames: usize,
     pub end_of_stream: bool,
     pub current_time_seconds: f64,
     pub duration_seconds: f64,
@@ -318,6 +331,21 @@ impl PlaybackSessionManager {
         outcome
     }
 
+    pub fn read_frames_v2(
+        &self,
+        session_id: u64,
+        frame_count: usize,
+        on_samples_channel: Channel<Vec<u8>>,
+        operation_token: Option<u64>,
+    ) -> Result<PlaybackFrameChunkMeta, String> {
+        let chunk = self.read_frames(session_id, frame_count, operation_token)?;
+        let meta = PlaybackFrameChunkMeta::from(&chunk);
+        on_samples_channel
+            .send(encode_samples_f32le(&chunk.samples))
+            .map_err(|error| error.to_string())?;
+        Ok(meta)
+    }
+
     pub fn close_session(&self, session_id: u64) {
         self.diagnostics.append_native(
             "native-close-requested",
@@ -354,6 +382,28 @@ impl Default for PlaybackSessionManager {
     fn default() -> Self {
         Self::new(PlaybackDiagnostics::default())
     }
+}
+
+impl From<&PlaybackFrameChunk> for PlaybackFrameChunkMeta {
+    fn from(value: &PlaybackFrameChunk) -> Self {
+        Self {
+            session_id: value.session_id,
+            sample_rate: value.sample_rate,
+            channel_count: value.channel_count,
+            frames: value.frames,
+            end_of_stream: value.end_of_stream,
+            current_time_seconds: value.current_time_seconds,
+            duration_seconds: value.duration_seconds,
+        }
+    }
+}
+
+fn encode_samples_f32le(samples: &[f32]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(samples.len() * std::mem::size_of::<f32>());
+    for sample in samples {
+        bytes.extend_from_slice(&sample.to_le_bytes());
+    }
+    bytes
 }
 
 struct PlaybackSession {
@@ -795,7 +845,7 @@ impl PlaybackSession {
 
 #[cfg(test)]
 mod tests {
-    use super::PlaybackSessionManager;
+    use super::{encode_samples_f32le, PlaybackFrameChunk, PlaybackFrameChunkMeta, PlaybackSessionManager};
     use std::{
         fs,
         path::{Path, PathBuf},
@@ -987,5 +1037,35 @@ mod tests {
             .expect("frames after third seek should read");
         assert_eq!(after_third_seek.frames, 512);
         assert!(after_third_seek.current_time_seconds >= 0.11);
+    }
+
+    #[test]
+    fn raw_channel_payload_matches_chunk_metadata_and_byte_length() {
+        let chunk = PlaybackFrameChunk {
+            session_id: 7,
+            sample_rate: 48_000,
+            channel_count: 2,
+            frames: 2,
+            samples: vec![0.25, -0.5, 1.0, -1.0],
+            end_of_stream: true,
+            current_time_seconds: 1.25,
+            duration_seconds: 3.5,
+        };
+
+        let meta = PlaybackFrameChunkMeta::from(&chunk);
+        let bytes = encode_samples_f32le(&chunk.samples);
+
+        assert_eq!(meta.session_id, chunk.session_id);
+        assert_eq!(meta.frames, chunk.frames);
+        assert!(meta.end_of_stream);
+        assert_eq!(bytes.len(), chunk.samples.len() * std::mem::size_of::<f32>());
+        assert_eq!(
+            f32::from_le_bytes(bytes[0..4].try_into().expect("first sample bytes should exist")),
+            0.25,
+        );
+        assert_eq!(
+            f32::from_le_bytes(bytes[4..8].try_into().expect("second sample bytes should exist")),
+            -0.5,
+        );
     }
 }

@@ -13,6 +13,7 @@ export interface Track {
   durationMs: number;
   format: "mp3" | "wav" | "flac";
   modifiedAt: number;
+  fileSize?: number | null;
 }
 
 export interface Album {

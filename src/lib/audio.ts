@@ -4,11 +4,14 @@ import {
   openPlaybackSession,
   type PlaybackLogEntry,
   readPlaybackFrames,
+  readPlaybackFramesV2,
   seekPlaybackSession,
+  type PlaybackTransportMode,
 } from "./tauri";
 import type { Track } from "./types";
 
 export type PlaybackStatus = "idle" | "buffering" | "ready" | "playing" | "paused" | "ended" | "error";
+export type { PlaybackTransportMode } from "./tauri";
 
 export type AudioCallbacks = {
   onTimeUpdate?: (currentTime: number, duration: number) => void;
@@ -139,6 +142,7 @@ export class AudioEngine {
   private pendingSeekSeconds: number | null = null;
   private seekPromise: Promise<void> | null = null;
   private playbackLogPromise: Promise<void> = Promise.resolve();
+  private transportMode: PlaybackTransportMode = "legacy";
 
   setCallbacks(callbacks: AudioCallbacks) {
     this.callbacks = callbacks;
@@ -152,6 +156,14 @@ export class AudioEngine {
   getAnalyzerInputNode() {
     this.ensureAudioGraphBase();
     return this.analyzerInputNode!;
+  }
+
+  getTransportMode() {
+    return this.transportMode;
+  }
+
+  setTransportMode(transportMode: PlaybackTransportMode) {
+    this.transportMode = transportMode;
   }
 
   private nextOperationToken() {
@@ -455,7 +467,10 @@ export class AudioEngine {
 
     const readStartedAt = performance.now();
     const readPromise = (async () => {
-      const chunk = await readPlaybackFrames(session.sessionId, READ_CHUNK_FRAMES, operationToken);
+      const chunk =
+        this.transportMode === "raw-channel"
+          ? await readPlaybackFramesV2(session.sessionId, READ_CHUNK_FRAMES, operationToken)
+          : await readPlaybackFrames(session.sessionId, READ_CHUNK_FRAMES, operationToken);
       if (!this.isActiveOperation(session.generation, session.sessionId, operationToken)) {
         return;
       }
@@ -478,7 +493,7 @@ export class AudioEngine {
       session.endOfStream = chunk.endOfStream;
 
       if (chunk.frames > 0) {
-        const samples = Float32Array.from(chunk.samples);
+        const samples = chunk.samples instanceof Float32Array ? chunk.samples : Float32Array.from(chunk.samples);
         session.bufferedFrames += chunk.frames;
         this.postToWorklet({
           type: "append",

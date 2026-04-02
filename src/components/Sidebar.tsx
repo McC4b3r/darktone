@@ -1,6 +1,6 @@
 import { animated, useReducedMotion, useSpring } from "@react-spring/web";
-import { useEffect, useRef, useState, type RefObject } from "react";
-import type { ArtistGroup, Track } from "../lib/types";
+import { useEffect, useMemo, useRef, useState, type RefObject } from "react";
+import type { Album, ArtistGroup, Track } from "../lib/types";
 import { VirtualList } from "./VirtualList";
 
 interface SidebarProps {
@@ -20,6 +20,50 @@ interface SidebarProps {
   onSearchChange: (value: string) => void;
   onToggleCollapsed: () => void;
   onFocusSearch: () => void;
+}
+
+const ARTIST_ROW_SIZE = 32;
+const ALBUM_ROW_SIZE = 32;
+const TRACK_ROW_SIZE = 24;
+const EXPANDED_GROUP_PADDING = 6;
+
+type SidebarArtistRow = {
+  key: string;
+  kind: "artist";
+  size: number;
+  artist: ArtistGroup;
+  isActive: boolean;
+  isExpanded: boolean;
+};
+
+type SidebarAlbumRow = {
+  key: string;
+  kind: "album";
+  size: number;
+  artistId: string;
+  album: Album;
+  isExpanded: boolean;
+  isFirstAlbum: boolean;
+};
+
+type SidebarTrackRow = {
+  key: string;
+  kind: "track";
+  size: number;
+  albumId: string;
+  track: Track;
+  albumTracks: Track[];
+  isFirstTrack: boolean;
+};
+
+type SidebarRow = SidebarArtistRow | SidebarAlbumRow | SidebarTrackRow;
+
+function getSidebarRowKey(row: SidebarRow) {
+  return row.key;
+}
+
+function getSidebarRowSize(row: SidebarRow) {
+  return row.size;
 }
 
 export function Sidebar({
@@ -44,12 +88,6 @@ export function Sidebar({
   const previousSearchQueryRef = useRef(searchQuery);
   const scrollRequestKeyRef = useRef(0);
   const [scrollRequest, setScrollRequest] = useState<{ index: number; key: number } | null>(null);
-  const ARTIST_GROUP_ROW_HEIGHT = 28;
-  const ALBUM_ROW_HEIGHT = 28;
-  const TRACK_ROW_HEIGHT = 22;
-  const GROUP_ROW_GAP = 4;
-  const TRACK_ROW_GAP = 2;
-  const EXPANDED_GROUP_PADDING = 6;
   const [expandedPaneSpring] = useSpring(() => ({
     opacity: collapsed ? 0 : 1,
     x: collapsed ? -14 : 0,
@@ -71,6 +109,57 @@ export function Sidebar({
     immediate: Boolean(reduceMotion),
   }), [collapsed, reduceMotion]);
 
+  const rows = useMemo<SidebarRow[]>(() => {
+    const nextRows: SidebarRow[] = [];
+
+    for (const artist of artists) {
+      const isExpanded = selectedArtistId === artist.id;
+      nextRows.push({
+        key: `artist:${artist.id}`,
+        kind: "artist",
+        size: ARTIST_ROW_SIZE,
+        artist,
+        isActive: activeArtistId === artist.id,
+        isExpanded,
+      });
+
+      if (!isExpanded) {
+        continue;
+      }
+
+      for (const [albumIndex, album] of artist.albums.entries()) {
+        const albumExpanded = selectedAlbumId === album.id;
+        nextRows.push({
+          key: `album:${album.id}`,
+          kind: "album",
+          size: ALBUM_ROW_SIZE + (albumIndex === 0 ? EXPANDED_GROUP_PADDING : 0),
+          artistId: artist.id,
+          album,
+          isExpanded: albumExpanded,
+          isFirstAlbum: albumIndex === 0,
+        });
+
+        if (!albumExpanded) {
+          continue;
+        }
+
+        for (const [trackIndex, track] of album.tracks.entries()) {
+          nextRows.push({
+            key: `track:${track.id}`,
+            kind: "track",
+            size: TRACK_ROW_SIZE + (trackIndex === 0 ? EXPANDED_GROUP_PADDING : 0),
+            albumId: album.id,
+            track,
+            albumTracks: album.tracks,
+            isFirstTrack: trackIndex === 0,
+          });
+        }
+      }
+    }
+
+    return nextRows;
+  }, [activeArtistId, artists, selectedAlbumId, selectedArtistId]);
+
   useEffect(() => {
     const previousSearchQuery = previousSearchQueryRef.current;
     const didClearSearch = previousSearchQuery.trim().length > 0 && searchQuery.trim().length === 0;
@@ -85,7 +174,7 @@ export function Sidebar({
       return;
     }
 
-    const anchorArtistIndex = artists.findIndex((artist) => artist.id === anchorArtistId);
+    const anchorArtistIndex = rows.findIndex((row) => row.kind === "artist" && row.artist.id === anchorArtistId);
     if (anchorArtistIndex === -1) {
       return;
     }
@@ -95,7 +184,7 @@ export function Sidebar({
       index: anchorArtistIndex,
       key: scrollRequestKeyRef.current,
     });
-  }, [activeArtistId, artists, searchQuery, selectedArtistId]);
+  }, [activeArtistId, rows, searchQuery, selectedArtistId]);
 
   function clearSearch() {
     onSearchChange("");
@@ -173,92 +262,79 @@ export function Sidebar({
 
           <div className="sidebar__section sidebar__section--grow">
             <VirtualList
-              items={artists}
+              items={rows}
               className="artist-list"
-              itemClassName="artist-list__item"
               virtualizationThreshold={36}
-              getKey={(artist) => artist.id}
+              getKey={getSidebarRowKey}
               scrollToIndex={scrollRequest?.index ?? null}
               scrollRequestKey={scrollRequest?.key ?? null}
               scrollAlignment="start"
-              getItemSize={(artist) => {
-                let size = ARTIST_GROUP_ROW_HEIGHT + GROUP_ROW_GAP;
-
-                if (selectedArtistId !== artist.id) {
-                  return size;
-                }
-
-                size += EXPANDED_GROUP_PADDING;
-                size += artist.albums.reduce((total, album) => {
-                  let albumSize = ALBUM_ROW_HEIGHT + GROUP_ROW_GAP;
-                  if (selectedAlbumId === album.id) {
-                    albumSize += EXPANDED_GROUP_PADDING + album.tracks.length * (TRACK_ROW_HEIGHT + TRACK_ROW_GAP);
-                  }
-                  return total + albumSize;
-                }, 0);
-
-                return size;
-              }}
-              renderItem={(artist) => {
-                const isExpanded = selectedArtistId === artist.id;
-                const isActive = activeArtistId === artist.id;
-
-                return (
-                  <div className="artist-list__group">
+              getItemSize={getSidebarRowSize}
+              renderItem={(row) => {
+                if (row.kind === "artist") {
+                  return (
                     <button
-                      className={`nav-item ${isActive ? "nav-item--active" : ""}`}
+                      className={`nav-item ${row.isActive ? "nav-item--active" : ""}`}
                       onClick={() => {
-                        if (isExpanded) {
+                        if (row.isExpanded) {
                           onSelectArtist(null);
                           return;
                         }
 
-                        onSelectArtist(artist.id);
-                        if (!isActive) {
+                        onSelectArtist(row.artist.id);
+                        if (!row.isActive) {
                           onSelectAlbum(null);
                         }
                       }}
                     >
-                      <span>{artist.name}</span>
-                      <span className="nav-item__meta">{artist.albums.length}</span>
+                      <span>{row.artist.name}</span>
+                      <span className="nav-item__meta">{row.artist.albums.length}</span>
                     </button>
+                  );
+                }
 
-                    {isExpanded ? (
-                      <div className="artist-list__albums">
-                        {artist.albums.map((album) => (
-                          <div key={album.id} className="tree-node">
-                            <button
-                              className={`sub-nav-item ${selectedAlbumId === album.id ? "sub-nav-item--active" : ""}`}
-                              onClick={() => onSelectAlbum(selectedAlbumId === album.id ? null : album.id)}
-                            >
-                              <span className="tree-label">
-                                <span className="tree-caret">{selectedAlbumId === album.id ? "▾" : "▸"}</span>
-                                <span>{album.title}</span>
-                              </span>
-                              <span className="nav-item__meta">{album.trackCount}</span>
-                            </button>
+                if (row.kind === "album") {
+                  return (
+                    <div
+                      className="tree-node"
+                      style={{
+                        paddingTop: row.isFirstAlbum ? EXPANDED_GROUP_PADDING : 0,
+                        paddingLeft: 8,
+                      }}
+                    >
+                      <button
+                        className={`sub-nav-item ${row.isExpanded ? "sub-nav-item--active" : ""}`}
+                        onClick={() => onSelectAlbum(row.isExpanded ? null : row.album.id)}
+                      >
+                        <span className="tree-label">
+                          <span className="tree-caret">{row.isExpanded ? "▾" : "▸"}</span>
+                          <span>{row.album.title}</span>
+                        </span>
+                        <span className="nav-item__meta">{row.album.trackCount}</span>
+                      </button>
+                    </div>
+                  );
+                }
 
-                            {selectedAlbumId === album.id ? (
-                              <div className="tree-children">
-                                {album.tracks.map((track) => (
-                                  <button
-                                    key={track.id}
-                                    className={`tree-leaf ${currentTrackId === track.id ? "tree-leaf--active" : ""}`}
-                                    onClick={() => onSelectTrack(track, album.tracks)}
-                                    title={track.title}
-                                  >
-                                    <span className="tree-label">
-                                      <span className="tree-file-dot">♪</span>
-                                      <span className="tree-leaf__text">{track.title}</span>
-                                    </span>
-                                  </button>
-                                ))}
-                              </div>
-                            ) : null}
-                          </div>
-                        ))}
-                      </div>
-                    ) : null}
+                return (
+                  <div
+                    style={{
+                      paddingTop: row.isFirstTrack ? EXPANDED_GROUP_PADDING : 0,
+                      marginLeft: 14,
+                      paddingLeft: 8,
+                      borderLeft: "1px solid rgba(124, 149, 187, 0.12)",
+                    }}
+                  >
+                    <button
+                      className={`tree-leaf ${currentTrackId === row.track.id ? "tree-leaf--active" : ""}`}
+                      onClick={() => onSelectTrack(row.track, row.albumTracks)}
+                      title={row.track.title}
+                    >
+                      <span className="tree-label">
+                        <span className="tree-file-dot">♪</span>
+                        <span className="tree-leaf__text">{row.track.title}</span>
+                      </span>
+                    </button>
                   </div>
                 );
               }}

@@ -37,6 +37,44 @@ jobs:
         with:
           args: --bundles nsis
 
+      - name: Run packaged playback smoke test
+        shell: pwsh
+        run: |
+          $env:DARKTONE_PLAYBACK_SMOKE = "1"
+          $env:DARKTONE_PLAYBACK_SMOKE_REPORT = Join-Path $env:GITHUB_WORKSPACE "playback-smoke-report.json"
+          $env:DARKTONE_PLAYBACK_TRANSPORT = "legacy"
+
+          if (Test-Path $env:DARKTONE_PLAYBACK_SMOKE_REPORT) {
+            Remove-Item $env:DARKTONE_PLAYBACK_SMOKE_REPORT -Force
+          }
+
+          $exePath = Join-Path $env:GITHUB_WORKSPACE "src-tauri\target\release\darktone-player.exe"
+          if (-not (Test-Path $exePath)) {
+            throw "Could not find the packaged release executable at $exePath"
+          }
+
+          $process = Start-Process -FilePath $exePath -Wait -PassThru -NoNewWindow
+          if ($process.ExitCode -ne 0) {
+            throw "Playback smoke executable exited with code $($process.ExitCode)"
+          }
+
+          if (-not (Test-Path $env:DARKTONE_PLAYBACK_SMOKE_REPORT)) {
+            throw "Playback smoke report was not created."
+          }
+
+          $report = Get-Content $env:DARKTONE_PLAYBACK_SMOKE_REPORT -Raw | ConvertFrom-Json
+          if (-not $report.passed) {
+            throw "Playback smoke report marked the run as failed."
+          }
+
+      - name: Upload playback smoke report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-playback-smoke-report
+          path: playback-smoke-report.json
+          if-no-files-found: warn
+
       - name: Upload Windows installer
         uses: actions/upload-artifact@v4
         with:

@@ -1,6 +1,6 @@
 import { useEffect, useRef } from "react";
 import AudioMotionAnalyzer from "audiomotion-analyzer";
-import { audioEngine } from "../lib/audio";
+import { createNowPlayingAnalyzer } from "../lib/analyzerPresets";
 import { formatTime } from "../lib/library";
 import { usePlaybackProgress } from "../lib/playbackProgress";
 import type { Album, Track } from "../lib/types";
@@ -30,45 +30,7 @@ export function NowPlayingPanel({
   useEffect(() => {
     if (!visualRef.current || analyzerRef.current) return;
 
-    const analyzer = new AudioMotionAnalyzer(visualRef.current, {
-      audioCtx: audioEngine.getAudioContext(),
-      source: audioEngine.getAnalyzerInputNode(),
-      connectSpeakers: false,
-      height: 168,
-      fftSize: 8192,
-      mode: 10,
-      colorMode: "bar-level",
-      lineWidth: 2,
-      fillAlpha: 0.2,
-      overlay: true,
-      bgAlpha: 0.7,
-      reflexFit: true,
-      showScaleX: false,
-      showScaleY: false,
-      showPeaks: true,
-      peakLine: false,
-      fadePeaks: false,
-      gravity: 3.8,
-      peakFadeTime: 750,
-      peakHoldTime: 500,
-      reflexRatio: 0.4,
-      reflexAlpha: 1,
-      reflexBright: 1,
-      mirror: -1,
-      smoothing: 0.7,
-      minFreq: 20,
-      maxFreq: 8000,
-      minDecibels: -85,
-      maxDecibels: -25,
-      gradient: "rainbow",
-      frequencyScale: "log",
-      weightingFilter: "D",
-      linearAmplitude: true,
-      linearBoost: 1.6,
-      maxFPS: 0,
-    });
-    analyzer.canvas.style.background = "transparent";
-    analyzer.canvas.parentElement?.style.setProperty("background", "transparent");
+    const analyzer = createNowPlayingAnalyzer(visualRef.current);
     analyzerRef.current = analyzer;
 
     return () => {

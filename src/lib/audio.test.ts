@@ -4,6 +4,7 @@ import type { Track } from "./types";
 
 const mockOpenPlaybackSession = vi.fn();
 const mockReadPlaybackFrames = vi.fn();
+const mockReadPlaybackFramesV2 = vi.fn();
 const mockSeekPlaybackSession = vi.fn();
 const mockClosePlaybackSession = vi.fn();
 const mockAppendPlaybackLogEntry = vi.fn();
@@ -12,6 +13,7 @@ const mockGetPlaybackLogPath = vi.fn();
 vi.mock("./tauri", () => ({
   openPlaybackSession: (...args: unknown[]) => mockOpenPlaybackSession(...args),
   readPlaybackFrames: (...args: unknown[]) => mockReadPlaybackFrames(...args),
+  readPlaybackFramesV2: (...args: unknown[]) => mockReadPlaybackFramesV2(...args),
   seekPlaybackSession: (...args: unknown[]) => mockSeekPlaybackSession(...args),
   closePlaybackSession: (...args: unknown[]) => mockClosePlaybackSession(...args),
   appendPlaybackLogEntry: (...args: unknown[]) => mockAppendPlaybackLogEntry(...args),
@@ -171,6 +173,7 @@ beforeEach(() => {
 
   mockOpenPlaybackSession.mockReset();
   mockReadPlaybackFrames.mockReset();
+  mockReadPlaybackFramesV2.mockReset();
   mockSeekPlaybackSession.mockReset();
   mockClosePlaybackSession.mockReset();
   mockAppendPlaybackLogEntry.mockReset();
@@ -527,5 +530,43 @@ describe("AudioEngine", () => {
       "Playback stalled while waiting for decoded audio frames.",
     );
     expect(mockReadPlaybackFrames).toHaveBeenCalledTimes(2);
+  });
+
+  it("supports the raw-channel transport path while preserving the worklet message contract", async () => {
+    mockOpenPlaybackSession.mockResolvedValue(playbackMetadata(101));
+    mockReadPlaybackFramesV2
+      .mockResolvedValueOnce({
+        sessionId: 101,
+        sampleRate: 48_000,
+        channelCount: 2,
+        frames: 16_384,
+        endOfStream: false,
+        currentTimeSeconds: 16_384 / 48_000,
+        durationSeconds: 180,
+        samples: new Float32Array(16_384 * 2).fill(0.25),
+      })
+      .mockResolvedValueOnce({
+        sessionId: 101,
+        sampleRate: 48_000,
+        channelCount: 2,
+        frames: 16_384,
+        endOfStream: false,
+        currentTimeSeconds: 32_768 / 48_000,
+        durationSeconds: 180,
+        samples: new Float32Array(16_384 * 2).fill(0.5),
+      });
+
+    const { AudioEngine } = await import("./audio");
+    const engine = new AudioEngine();
+    engine.setTransportMode("raw-channel");
+
+    await engine.load(track, false);
+
+    expect(mockReadPlaybackFramesV2.mock.calls.length).toBeGreaterThanOrEqual(2);
+    expect(mockReadPlaybackFrames).not.toHaveBeenCalled();
+    const appendMessages = (latestWorkletPort().sentMessages as Array<{ type?: string }>).filter(
+      (message) => message.type === "append",
+    );
+    expect(appendMessages).toHaveLength(2);
   });
 });

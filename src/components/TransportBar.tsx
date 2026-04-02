@@ -1,4 +1,4 @@
-import type { CSSProperties } from "react";
+import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { formatTime } from "../lib/library";
 import { usePlaybackProgress } from "../lib/playbackProgress";
 
@@ -18,17 +18,49 @@ export function TransportBar({
   onToggleMute,
 }: TransportBarProps) {
   const playbackProgress = usePlaybackProgress();
+  const [draftSeekSeconds, setDraftSeekSeconds] = useState<number | null>(null);
+  const draftSeekSecondsRef = useRef<number | null>(null);
   const timelineMax = Math.max(playbackProgress.duration, 1);
-  const timelineValue = Math.min(playbackProgress.currentTime, playbackProgress.duration || 0);
+  const displayedCurrentTime =
+    draftSeekSeconds === null ? playbackProgress.currentTime : Math.min(draftSeekSeconds, playbackProgress.duration || timelineMax);
+  const timelineValue = Math.min(displayedCurrentTime, playbackProgress.duration || 0);
   const timelinePercent = Math.min(100, (timelineValue / timelineMax) * 100);
   const volumePercent = Math.min(100, Math.max(0, volume * 100));
-  const remaining = Math.max(playbackProgress.duration - playbackProgress.currentTime, 0);
+  const remaining = Math.max(playbackProgress.duration - displayedCurrentTime, 0);
+
+  useEffect(() => {
+    if (draftSeekSeconds === null) {
+      return;
+    }
+
+    const clampedDraft = Math.min(draftSeekSeconds, playbackProgress.duration || timelineMax);
+    if (clampedDraft !== draftSeekSeconds) {
+      draftSeekSecondsRef.current = clampedDraft;
+      setDraftSeekSeconds(clampedDraft);
+    }
+  }, [draftSeekSeconds, playbackProgress.duration, timelineMax]);
+
+  function updateDraftSeek(seconds: number) {
+    draftSeekSecondsRef.current = seconds;
+    setDraftSeekSeconds(seconds);
+  }
+
+  function commitDraftSeek() {
+    const nextSeekSeconds = draftSeekSecondsRef.current;
+    if (nextSeekSeconds === null) {
+      return;
+    }
+
+    draftSeekSecondsRef.current = null;
+    setDraftSeekSeconds(null);
+    onSeek(nextSeekSeconds);
+  }
 
   return (
     <footer className="transport panel">
       <div className="transport__controls">
         <div className="transport__timeline">
-          <span className="transport__time transport__time--elapsed">{formatTime(playbackProgress.currentTime)}</span>
+          <span className="transport__time transport__time--elapsed">{formatTime(displayedCurrentTime)}</span>
           <input
             className="range range--timeline"
             type="range"
@@ -41,7 +73,23 @@ export function TransportBar({
                 "--range-progress": `${timelinePercent}%`,
               } as CSSProperties
             }
-            onChange={(event) => onSeek(Number(event.target.value))}
+            onChange={(event) => updateDraftSeek(Number(event.target.value))}
+            onPointerUp={commitDraftSeek}
+            onBlur={commitDraftSeek}
+            onKeyUp={(event) => {
+              if (
+                event.key === "ArrowLeft" ||
+                event.key === "ArrowRight" ||
+                event.key === "ArrowUp" ||
+                event.key === "ArrowDown" ||
+                event.key === "Home" ||
+                event.key === "End" ||
+                event.key === "PageUp" ||
+                event.key === "PageDown"
+              ) {
+                commitDraftSeek();
+              }
+            }}
           />
           <span className="transport__time transport__time--remaining">-{formatTime(remaining)}</span>
         </div>

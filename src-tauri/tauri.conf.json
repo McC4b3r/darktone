@@ -31,6 +31,7 @@
   "bundle": {
     "active": true,
     "targets": "all",
-    "createUpdaterArtifacts": false
+    "createUpdaterArtifacts": false,
+    "resources": ["../fixtures/playback-smoke"]
   }
 }

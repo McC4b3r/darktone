@@ -13,6 +13,7 @@ type UsePlayerAppState = {
   currentTrack: Track | null;
   playback: PlaybackState;
   togglePlay: () => Promise<void>;
+  setVolume: (volume: number) => void;
 };
 
 const mockListen = vi.fn();
@@ -400,5 +401,64 @@ describe("usePlayerApp", () => {
       root.unmount();
       await flushEffects();
     });
+  });
+
+  it("debounces settings writes and flushes them when the page hides", async () => {
+    vi.useFakeTimers();
+
+    const { usePlayerApp } = await import("./usePlayerApp");
+    let latestState: UsePlayerAppState | null = null;
+    const container = document.createElement("div");
+    const root = ReactDOM.createRoot(container);
+
+    function Probe() {
+      const state = usePlayerApp();
+      useEffect(() => {
+        latestState = state;
+      }, [state]);
+      return <div>{state.error ?? ""}</div>;
+    }
+
+    await act(async () => {
+      root.render(<Probe />);
+      await flushEffects();
+    });
+
+    expect(mockSaveSettings).not.toHaveBeenCalled();
+
+    await act(async () => {
+      (latestState as UsePlayerAppState).setVolume(0.5);
+    });
+
+    vi.advanceTimersByTime(299);
+    await flushEffects();
+    expect(mockSaveSettings).not.toHaveBeenCalled();
+
+    vi.advanceTimersByTime(1);
+    await flushEffects();
+    expect(mockSaveSettings).toHaveBeenCalledTimes(1);
+    expect(mockSaveSettings.mock.calls[0]?.[0].volume).toBe(0.5);
+
+    mockSaveSettings.mockClear();
+
+    await act(async () => {
+      (latestState as UsePlayerAppState).setVolume(0.4);
+      await flushEffects();
+    });
+
+    await act(async () => {
+      window.dispatchEvent(new Event("pagehide"));
+      await flushEffects();
+    });
+
+    expect(mockSaveSettings).toHaveBeenCalledTimes(1);
+    expect(mockSaveSettings.mock.calls[0]?.[0].volume).toBe(0.4);
+
+    await act(async () => {
+      root.unmount();
+      await flushEffects();
+    });
+
+    vi.useRealTimers();
   });
 });

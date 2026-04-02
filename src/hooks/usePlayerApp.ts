@@ -55,6 +55,7 @@ const EMPTY_LIBRARY: LibraryData = {
 };
 
 const PLAYBACK_DEBUG_STORAGE_KEY = "darktone:debug-playback";
+const SETTINGS_SAVE_DEBOUNCE_MS = 300;
 
 function isPlaybackDebugEnabled() {
   if (import.meta.env.DEV) {
@@ -208,6 +209,10 @@ export function usePlayerApp() {
   const watcherSyncInFlightRef = useRef(false);
   const syncChangedPathsRef = useRef<(changedPaths: string[], announce?: boolean) => Promise<void>>(async () => undefined);
   const playbackRequestIdRef = useRef(0);
+  const settingsSaveTimeoutRef = useRef<number | null>(null);
+  const pendingSettingsRef = useRef<AppSettings | null>(null);
+  const lastPersistedSettingsSignatureRef = useRef<string | null>(null);
+  const flushPendingSettingsWriteRef = useRef<() => Promise<void>>(async () => undefined);
 
   const normalizedLibrary = useMemo(() => normalizeLibrary(library), [library]);
   const filteredLibrary = useMemo(
@@ -348,6 +353,81 @@ export function usePlayerApp() {
   }, [playbackState.volume, playbackState.muted]);
 
   useEffect(() => {
+    const flushPendingSettings = () => {
+      void flushPendingSettingsWriteRef.current();
+    };
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "hidden") {
+        flushPendingSettings();
+      }
+    };
+
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    window.addEventListener("pagehide", flushPendingSettings);
+    window.addEventListener("beforeunload", flushPendingSettings);
+
+    return () => {
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      window.removeEventListener("pagehide", flushPendingSettings);
+      window.removeEventListener("beforeunload", flushPendingSettings);
+      flushPendingSettings();
+    };
+  }, []);
+
+  async function persistSettingsNow(nextSettings: AppSettings) {
+    const nextSignature = JSON.stringify(nextSettings);
+    if (lastPersistedSettingsSignatureRef.current === nextSignature) {
+      return;
+    }
+
+    await saveSettings(nextSettings);
+    lastPersistedSettingsSignatureRef.current = nextSignature;
+  }
+
+  function scheduleSettingsSave(nextSettings: AppSettings) {
+    pendingSettingsRef.current = nextSettings;
+
+    if (settingsSaveTimeoutRef.current !== null) {
+      window.clearTimeout(settingsSaveTimeoutRef.current);
+    }
+
+    settingsSaveTimeoutRef.current = window.setTimeout(() => {
+      settingsSaveTimeoutRef.current = null;
+      const pendingSettings = pendingSettingsRef.current;
+      pendingSettingsRef.current = null;
+      if (!pendingSettings) {
+        return;
+      }
+
+      void persistSettingsNow(pendingSettings).catch((cause) => {
+        console.error(cause);
+        setError("Could not save app settings.");
+      });
+    }, SETTINGS_SAVE_DEBOUNCE_MS);
+  }
+
+  flushPendingSettingsWriteRef.current = async () => {
+    if (settingsSaveTimeoutRef.current !== null) {
+      window.clearTimeout(settingsSaveTimeoutRef.current);
+      settingsSaveTimeoutRef.current = null;
+    }
+
+    const pendingSettings = pendingSettingsRef.current;
+    pendingSettingsRef.current = null;
+    if (!pendingSettings) {
+      return;
+    }
+
+    try {
+      await persistSettingsNow(pendingSettings);
+    } catch (cause) {
+      console.error(cause);
+      setError("Could not save app settings.");
+    }
+  };
+
+  useEffect(() => {
     if (!hasInitializedRef.current) return;
 
     const nextSettings: AppSettings = {
@@ -360,10 +440,7 @@ export function usePlayerApp() {
       currentTrackId: currentTrack?.id ?? null,
     };
 
-    void saveSettings(nextSettings).catch((cause) => {
-      console.error(cause);
-      setError("Could not save app settings.");
-    });
+    scheduleSettingsSave(nextSettings);
     // We intentionally persist when queue/playback values change.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [queue, currentTrack?.id, playbackState.volume, playbackState.muted, playbackState.repeatMode, playbackState.shuffle]);
@@ -390,6 +467,7 @@ export function usePlayerApp() {
         restoredQueueCount: storedSettings.queueTrackIds.length,
         musicFolderCount: storedSettings.musicFolders.length,
       });
+      lastPersistedSettingsSignatureRef.current = JSON.stringify(storedSettings);
       setSettings(storedSettings);
       setLibrary(nextLibrary);
       setPlaybackState((state) => ({
@@ -534,10 +612,11 @@ export function usePlayerApp() {
       const folders = await pickMusicFolders();
       if (!folders.length) return;
 
+      await flushPendingSettingsWriteRef.current();
       const uniqueFolders = Array.from(new Set([...settings.musicFolders, ...folders]));
       const nextSettings = { ...settings, musicFolders: uniqueFolders };
       setSettings(nextSettings);
-      await saveSettings(nextSettings);
+      await persistSettingsNow(nextSettings);
       await refreshLibrary(uniqueFolders);
     } catch (cause) {
       console.error(cause);
@@ -753,7 +832,6 @@ export function usePlayerApp() {
   }
 
   function seek(seconds: number) {
-    setPlaybackProgress((state) => ({ ...state, currentTime: seconds }));
     void audioEngine.seek(seconds).catch((cause) => {
       console.error(cause);
       setError(getPlaybackErrorMessage(cause));
