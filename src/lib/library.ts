@@ -12,6 +12,15 @@ function normalizeValue(value: string | null | undefined, fallback: string) {
   return trimmed ? trimmed : fallback;
 }
 
+function normalizeDisplayText(value: string | null | undefined) {
+  return value?.replace(/\s+/g, " ").trim() ?? "";
+}
+
+function filenameTitleFallback(filename: string) {
+  const withoutExtension = filename.replace(/\.[^./\\]+$/, "");
+  return normalizeDisplayText(withoutExtension || filename);
+}
+
 function compareTracks(a: Track, b: Track) {
   if (a.artist !== b.artist) return a.artist.localeCompare(b.artist);
   if (a.album !== b.album) return a.album.localeCompare(b.album);
@@ -57,10 +66,11 @@ export function normalizeTrack(track: Track): Track {
   return markTrackNormalized({
     ...track,
     artPath: track.artPath?.trim() || null,
-    title: normalizeValue(track.title, track.filename),
-    artist: normalizeValue(track.artist, UNKNOWN_ARTIST),
-    album: normalizeValue(track.album, UNKNOWN_ALBUM),
+    title: normalizeValue(normalizeDisplayText(track.title), filenameTitleFallback(track.filename)),
+    artist: normalizeValue(normalizeDisplayText(track.artist), UNKNOWN_ARTIST),
+    album: normalizeValue(normalizeDisplayText(track.album), UNKNOWN_ALBUM),
     releaseYear: Number.isFinite(track.releaseYear) ? track.releaseYear : null,
+    trackNumber: Number.isFinite(track.trackNumber) && (track.trackNumber ?? 0) > 0 ? track.trackNumber : null,
   });
 }
 

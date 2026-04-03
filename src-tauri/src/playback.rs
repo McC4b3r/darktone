@@ -10,7 +10,6 @@ use std::{
     },
     time::Instant,
 };
-use tauri::ipc::Channel;
 use symphonia::{
     core::{
         audio::SampleBuffer,
@@ -21,6 +20,7 @@ use symphonia::{
     },
     default::get_codecs,
 };
+use tauri::ipc::Channel;
 
 const DEFAULT_OUTPUT_CHANNELS: u16 = 2;
 const SOURCE_BUFFER_TRIM_FRAMES: u64 = 4096;
@@ -209,12 +209,8 @@ impl PlaybackSessionManager {
         );
 
         let read_started_at = Instant::now();
-        let outcome = session.read_frames(
-            session_id,
-            frame_count,
-            operation_token,
-            &self.diagnostics,
-        );
+        let outcome =
+            session.read_frames(session_id, frame_count, operation_token, &self.diagnostics);
 
         match &outcome {
             Ok(chunk) => self.diagnostics.append_native(
@@ -432,9 +428,9 @@ impl PlaybackSession {
     ) -> Result<Self, String> {
         let probe = super::open_audio_format(path)?;
         let format = probe.format;
-        let track = format
-            .default_track()
-            .ok_or_else(|| "The audio file does not contain a playable default track.".to_string())?;
+        let track = format.default_track().ok_or_else(|| {
+            "The audio file does not contain a playable default track.".to_string()
+        })?;
 
         if track.codec_params.codec == CODEC_TYPE_NULL {
             return Err("The audio file uses an unsupported codec.".into());
@@ -527,7 +523,9 @@ impl PlaybackSession {
         self.decode_until_buffered_samples()?;
 
         if self.source_sample_rate == 0 || self.source_channel_count == 0 {
-            return Err("The audio file did not expose a usable sample format for playback.".into());
+            return Err(
+                "The audio file did not expose a usable sample format for playback.".into(),
+            );
         }
 
         Ok(())
@@ -562,7 +560,8 @@ impl PlaybackSession {
                 break;
             }
 
-            let relative_position = self.source_frame_cursor - (self.decoded_buffer_start_frame as f64);
+            let relative_position =
+                self.source_frame_cursor - (self.decoded_buffer_start_frame as f64);
             let frame_index = relative_position.floor().max(0.0) as u64;
             let fraction = (relative_position - frame_index as f64).clamp(0.0, 1.0) as f32;
             let current = self.read_stereo_frame(frame_index);
@@ -672,8 +671,9 @@ impl PlaybackSession {
             .max(0.0);
         self.decoded_buffer_start_frame = actual_source_frame.floor() as u64;
         self.source_frame_cursor = requested_source_frame.max(actual_source_frame);
-        self.output_frames_emitted =
-            (clamped_seconds * self.output_sample_rate as f64).round().max(0.0) as u64;
+        self.output_frames_emitted = (clamped_seconds * self.output_sample_rate as f64)
+            .round()
+            .max(0.0) as u64;
 
         let result = PlaybackSeekResult {
             session_id,
@@ -740,8 +740,9 @@ impl PlaybackSession {
 
         let samples_to_remove = removable_frames as usize * self.source_channel_count as usize;
         self.decoded_samples.drain(0..samples_to_remove);
-        self.decoded_buffer_start_frame =
-            self.decoded_buffer_start_frame.saturating_add(removable_frames);
+        self.decoded_buffer_start_frame = self
+            .decoded_buffer_start_frame
+            .saturating_add(removable_frames);
     }
 
     fn decode_until_buffered_samples(&mut self) -> Result<(), String> {
@@ -787,7 +788,9 @@ impl PlaybackSession {
             }
 
             if self.source_sample_rate != decoded.spec().rate {
-                return Err("Playback sample rate changed unexpectedly within the same track.".into());
+                return Err(
+                    "Playback sample rate changed unexpectedly within the same track.".into(),
+                );
             }
 
             let decoded_channel_count = decoded.spec().channels.count() as u16;
@@ -801,7 +804,8 @@ impl PlaybackSession {
                 SampleBuffer::<f32>::new(decoded.capacity() as u64, *decoded.spec());
             sample_buffer.copy_interleaved_ref(decoded);
             if !sample_buffer.samples().is_empty() {
-                self.decoded_samples.extend_from_slice(sample_buffer.samples());
+                self.decoded_samples
+                    .extend_from_slice(sample_buffer.samples());
                 return Ok(());
             }
         }
@@ -823,7 +827,11 @@ impl PlaybackSession {
         }
 
         let left = self.decoded_samples.get(base_index).copied().unwrap_or(0.0);
-        let right = self.decoded_samples.get(base_index + 1).copied().unwrap_or(left);
+        let right = self
+            .decoded_samples
+            .get(base_index + 1)
+            .copied()
+            .unwrap_or(left);
         (left, right)
     }
 
@@ -845,7 +853,9 @@ impl PlaybackSession {
 
 #[cfg(test)]
 mod tests {
-    use super::{encode_samples_f32le, PlaybackFrameChunk, PlaybackFrameChunkMeta, PlaybackSessionManager};
+    use super::{
+        encode_samples_f32le, PlaybackFrameChunk, PlaybackFrameChunkMeta, PlaybackSessionManager,
+    };
     use std::{
         fs,
         path::{Path, PathBuf},
@@ -1058,13 +1068,24 @@ mod tests {
         assert_eq!(meta.session_id, chunk.session_id);
         assert_eq!(meta.frames, chunk.frames);
         assert!(meta.end_of_stream);
-        assert_eq!(bytes.len(), chunk.samples.len() * std::mem::size_of::<f32>());
         assert_eq!(
-            f32::from_le_bytes(bytes[0..4].try_into().expect("first sample bytes should exist")),
+            bytes.len(),
+            chunk.samples.len() * std::mem::size_of::<f32>()
+        );
+        assert_eq!(
+            f32::from_le_bytes(
+                bytes[0..4]
+                    .try_into()
+                    .expect("first sample bytes should exist")
+            ),
             0.25,
         );
         assert_eq!(
-            f32::from_le_bytes(bytes[4..8].try_into().expect("second sample bytes should exist")),
+            f32::from_le_bytes(
+                bytes[4..8]
+                    .try_into()
+                    .expect("second sample bytes should exist")
+            ),
             -0.5,
         );
     }

@@ -8,8 +8,7 @@ use std::{
     collections::hash_map::DefaultHasher,
     collections::HashMap,
     collections::HashSet,
-    env,
-    fs,
+    env, fs,
     fs::File,
     fs::OpenOptions,
     hash::{Hash, Hasher},
@@ -398,11 +397,14 @@ where
     }
 
     let content = serde_json::to_vec(value).map_err(|error| error.to_string())?;
-    let extension = path.extension().and_then(|value| value.to_str()).unwrap_or("json");
-    let temporary_path =
-        path.with_extension(format!("{extension}.tmp-{}", current_timestamp_ms()));
+    let extension = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("json");
+    let temporary_path = path.with_extension(format!("{extension}.tmp-{}", current_timestamp_ms()));
     let mut file = File::create(&temporary_path).map_err(|error| error.to_string())?;
-    file.write_all(&content).map_err(|error| error.to_string())?;
+    file.write_all(&content)
+        .map_err(|error| error.to_string())?;
     file.sync_all().map_err(|error| error.to_string())?;
 
     match fs::rename(&temporary_path, path) {
@@ -554,6 +556,168 @@ fn parse_track_number(value: &str) -> Option<u32> {
         .and_then(|segment| segment.trim().parse::<u32>().ok())
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct ParsedFilenameMetadata {
+    title: Option<String>,
+    artist: Option<String>,
+    album: Option<String>,
+    track_number: Option<u32>,
+}
+
+fn collapse_whitespace(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn clean_segment(value: &str) -> Option<String> {
+    let normalized = collapse_whitespace(&value.replace('_', " "));
+    let trimmed = normalized.trim_matches(|character: char| {
+        character.is_whitespace() || matches!(character, '-' | '.' | '_' | '/' | '\\')
+    });
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
+fn split_leading_track_number(value: &str) -> (Option<u32>, String) {
+    let trimmed = value.trim();
+    let digit_len = trimmed
+        .chars()
+        .take_while(|character| character.is_ascii_digit())
+        .count();
+
+    if digit_len == 0 {
+        return (None, trimmed.to_string());
+    }
+
+    let Some(number) = trimmed
+        .get(..digit_len)
+        .and_then(|digits| digits.parse::<u32>().ok())
+    else {
+        return (None, trimmed.to_string());
+    };
+
+    let remainder = trimmed
+        .get(digit_len..)
+        .unwrap_or_default()
+        .trim_start_matches(|character: char| {
+            character.is_whitespace() || matches!(character, '-' | '.' | '_' | ')' | ']' | ':')
+        });
+
+    (Some(number), remainder.to_string())
+}
+
+fn strip_known_prefix<'a>(value: &'a str, prefix: &str) -> Option<&'a str> {
+    let trimmed = value.trim_start();
+    let remainder = trimmed.strip_prefix(prefix)?;
+    let remainder = remainder.trim_start_matches(|character: char| {
+        character.is_whitespace() || matches!(character, '-' | '.' | '_' | ':' | '/')
+    });
+    Some(remainder)
+}
+
+fn strip_title_prefixes(
+    value: &str,
+    track_number: Option<u32>,
+    artist: Option<&str>,
+    album: Option<&str>,
+) -> Option<String> {
+    let mut current = clean_segment(value)?;
+
+    loop {
+        let mut changed = false;
+
+        if let Some(number) = track_number {
+            let (leading_number, remainder) = split_leading_track_number(&current);
+            if leading_number == Some(number) && !remainder.trim().is_empty() {
+                current = remainder;
+                changed = true;
+            }
+        }
+
+        if let Some(artist_name) = artist {
+            if let Some(remainder) = strip_known_prefix(&current, artist_name) {
+                if !remainder.trim().is_empty() {
+                    current = remainder.to_string();
+                    changed = true;
+                }
+            }
+        }
+
+        if let Some(album_title) = album {
+            if let Some(remainder) = strip_known_prefix(&current, album_title) {
+                if !remainder.trim().is_empty() {
+                    current = remainder.to_string();
+                    changed = true;
+                }
+            }
+        }
+
+        if !changed {
+            break;
+        }
+    }
+
+    clean_segment(&current)
+}
+
+fn parse_filename_metadata(path: &Path) -> ParsedFilenameMetadata {
+    let raw_stem = path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_default();
+    let cleaned_stem = clean_segment(raw_stem).unwrap_or_default();
+    let (leading_track_number, remainder) = split_leading_track_number(&cleaned_stem);
+    let segments = remainder
+        .split(" - ")
+        .filter_map(clean_segment)
+        .collect::<Vec<_>>();
+
+    let mut parsed = ParsedFilenameMetadata {
+        track_number: leading_track_number,
+        ..ParsedFilenameMetadata::default()
+    };
+
+    match segments.as_slice() {
+        [artist, album, title_segments @ ..] if !title_segments.is_empty() => {
+            parsed.artist = Some(artist.clone());
+            parsed.album = Some(album.clone());
+
+            let combined_title = title_segments.join(" - ");
+            let (embedded_track_number, title_remainder) =
+                split_leading_track_number(&combined_title);
+            if parsed.track_number.is_none() {
+                parsed.track_number = embedded_track_number;
+            }
+
+            parsed.title = strip_title_prefixes(
+                &title_remainder,
+                parsed.track_number,
+                parsed.artist.as_deref(),
+                parsed.album.as_deref(),
+            );
+        }
+        [single] => {
+            parsed.title = strip_title_prefixes(single, parsed.track_number, None, None);
+        }
+        [] => {
+            parsed.title = clean_segment(&cleaned_stem);
+        }
+        _ => {
+            if let Some(last_segment) = segments.last() {
+                let (embedded_track_number, title_remainder) =
+                    split_leading_track_number(last_segment);
+                if parsed.track_number.is_none() {
+                    parsed.track_number = embedded_track_number;
+                }
+
+                parsed.title =
+                    strip_title_prefixes(&title_remainder, parsed.track_number, None, None);
+            }
+        }
+    }
+
+    parsed
+}
+
 fn parse_release_year(value: &str) -> Option<u32> {
     let digits = value
         .chars()
@@ -589,6 +753,7 @@ fn open_audio_format(path: &Path) -> Result<symphonia::core::probe::ProbeResult,
 fn fallback_track(path: &Path, album_art_cache: &mut AlbumArtCache) -> Result<Track, String> {
     fs::metadata(path).map_err(|error| error.to_string())?;
     let modified_at = path_modified_at(path).unwrap_or_default();
+    let parsed_filename = parse_filename_metadata(path);
 
     let format_name = path
         .extension()
@@ -607,34 +772,48 @@ fn fallback_track(path: &Path, album_art_cache: &mut AlbumArtCache) -> Result<Tr
         path: full_path,
         art_path: find_album_art(path, album_art_cache),
         filename: filename.clone(),
-        title: path
-            .file_stem()
-            .and_then(|stem| stem.to_str())
-            .filter(|value| !value.trim().is_empty())
-            .unwrap_or(&filename)
-            .to_string(),
-        artist: path
-            .parent()
-            .and_then(|parent| parent.parent())
-            .and_then(|parent| parent.file_name())
-            .and_then(|name| name.to_str())
-            .filter(|value| !value.trim().is_empty())
-            .unwrap_or("Unknown Artist")
-            .to_string(),
-        album: path
-            .parent()
-            .and_then(|parent| parent.file_name())
-            .and_then(|name| name.to_str())
-            .filter(|value| !value.trim().is_empty())
-            .unwrap_or("Unknown Album")
-            .to_string(),
+        title: parsed_filename
+            .title
+            .unwrap_or_else(|| clean_segment(&filename).unwrap_or(filename.clone())),
+        artist: parsed_filename
+            .artist
+            .or_else(|| {
+                path.parent()
+                    .and_then(|parent| parent.parent())
+                    .and_then(|parent| parent.file_name())
+                    .and_then(|name| name.to_str())
+                    .and_then(clean_segment)
+            })
+            .unwrap_or_else(|| "Unknown Artist".to_string()),
+        album: parsed_filename
+            .album
+            .or_else(|| {
+                path.parent()
+                    .and_then(|parent| parent.file_name())
+                    .and_then(|name| name.to_str())
+                    .and_then(clean_segment)
+            })
+            .unwrap_or_else(|| "Unknown Album".to_string()),
         release_year: None,
-        track_number: None,
+        track_number: parsed_filename.track_number,
         duration_ms: 0,
         format: format_name,
         modified_at,
         file_size: path_file_size(path),
     })
+}
+
+fn apply_embedded_tag(track: &mut Track, key: StandardTagKey, text: &str) {
+    match key {
+        StandardTagKey::TrackTitle => track.title = text.to_string(),
+        StandardTagKey::Artist => track.artist = text.to_string(),
+        StandardTagKey::Album => track.album = text.to_string(),
+        StandardTagKey::ReleaseDate | StandardTagKey::OriginalDate | StandardTagKey::Date => {
+            track.release_year = parse_release_year(text).or(track.release_year)
+        }
+        StandardTagKey::TrackNumber => track.track_number = parse_track_number(text),
+        _ => {}
+    }
 }
 
 fn inspect_audio_file(path: &Path, album_art_cache: &mut AlbumArtCache) -> Result<Track, String> {
@@ -649,17 +828,8 @@ fn inspect_audio_file(path: &Path, album_art_cache: &mut AlbumArtCache) -> Resul
                 continue;
             };
 
-            match tag.std_key {
-                Some(StandardTagKey::TrackTitle) => track.title = text,
-                Some(StandardTagKey::Artist) => track.artist = text,
-                Some(StandardTagKey::Album) => track.album = text,
-                Some(StandardTagKey::ReleaseDate)
-                | Some(StandardTagKey::OriginalDate)
-                | Some(StandardTagKey::Date) => {
-                    track.release_year = parse_release_year(&text).or(track.release_year)
-                }
-                Some(StandardTagKey::TrackNumber) => track.track_number = parse_track_number(&text),
-                _ => {}
+            if let Some(key) = tag.std_key {
+                apply_embedded_tag(&mut track, key, &text);
             }
         }
     }
@@ -736,7 +906,9 @@ fn playback_smoke_enabled() -> bool {
 fn playback_smoke_report_path() -> Result<PathBuf, String> {
     env::var(PLAYBACK_SMOKE_REPORT_ENV)
         .map(PathBuf::from)
-        .map_err(|_| format!("{PLAYBACK_SMOKE_REPORT_ENV} must be set when playback smoke mode is enabled."))
+        .map_err(|_| {
+            format!("{PLAYBACK_SMOKE_REPORT_ENV} must be set when playback smoke mode is enabled.")
+        })
 }
 
 fn playback_transport_mode() -> PlaybackTransportMode {
@@ -749,7 +921,10 @@ fn playback_transport_mode() -> PlaybackTransportMode {
 fn resolve_playback_smoke_fixture_path(app: &AppHandle, file_name: &str) -> Result<String, String> {
     let resource_path = app
         .path()
-        .resolve(format!("playback-smoke/{file_name}"), BaseDirectory::Resource)
+        .resolve(
+            format!("playback-smoke/{file_name}"),
+            BaseDirectory::Resource,
+        )
         .map_err(|error| error.to_string())?;
     if resource_path.exists() {
         return Ok(resource_path.to_string_lossy().into_owned());
@@ -762,7 +937,9 @@ fn resolve_playback_smoke_fixture_path(app: &AppHandle, file_name: &str) -> Resu
         return Ok(dev_path.to_string_lossy().into_owned());
     }
 
-    Err(format!("Playback smoke fixture {file_name} could not be resolved."))
+    Err(format!(
+        "Playback smoke fixture {file_name} could not be resolved."
+    ))
 }
 
 fn runtime_mode(app: &AppHandle) -> Result<RuntimeMode, String> {
@@ -1696,8 +1873,8 @@ async fn read_playback_frames(
     tauri::async_runtime::spawn_blocking(move || {
         manager.read_frames(session_id, frame_count, operation_token)
     })
-        .await
-        .map_err(|error| error.to_string())?
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -1710,12 +1887,7 @@ async fn read_playback_frames_v2(
 ) -> Result<PlaybackFrameChunkMeta, String> {
     let manager = playback_sessions.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        manager.read_frames_v2(
-            session_id,
-            frame_count,
-            on_samples_channel,
-            operation_token,
-        )
+        manager.read_frames_v2(session_id, frame_count, on_samples_channel, operation_token)
     })
     .await
     .map_err(|error| error.to_string())?
@@ -1732,8 +1904,8 @@ async fn seek_playback_session(
     tauri::async_runtime::spawn_blocking(move || {
         manager.seek_session(session_id, seconds, operation_token)
     })
-        .await
-        .map_err(|error| error.to_string())?
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -1836,9 +2008,10 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::{
-        decode_playback_request_path, encode_wav_from_pcm_i16, find_album_art,
-        reuse_cached_track, write_json, AlbumArtCache, PlaybackSmokeReport,
-        PlaybackSmokeTrackResult, PlaybackTransportMode, Track, TrackReuseCache,
+        apply_embedded_tag, decode_playback_request_path, encode_wav_from_pcm_i16, fallback_track,
+        find_album_art, parse_filename_metadata, reuse_cached_track, write_json, AlbumArtCache,
+        ParsedFilenameMetadata, PlaybackSmokeReport, PlaybackSmokeTrackResult,
+        PlaybackTransportMode, Track, TrackReuseCache,
     };
     use std::{
         fs,
@@ -1846,6 +2019,7 @@ mod tests {
         thread,
         time::{Duration, SystemTime, UNIX_EPOCH},
     };
+    use symphonia::core::meta::StandardTagKey;
     use tauri::http::Request;
 
     struct TestDir {
@@ -2014,9 +2188,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("track modified time should be after unix epoch")
             .as_millis() as u64;
-        let file_size = fs::metadata(&track_path)
-            .expect("track should exist")
-            .len();
+        let file_size = fs::metadata(&track_path).expect("track should exist").len();
         let track_key = fs::canonicalize(&track_path).expect("track should canonicalize");
 
         let mut reuse_cache = TrackReuseCache::new();
@@ -2045,5 +2217,103 @@ mod tests {
         assert_eq!(reused.title, "Dialed In");
         assert_eq!(reused.duration_ms, 123_000);
         assert_eq!(reused.file_size, Some(file_size));
+    }
+
+    #[test]
+    fn parses_artist_album_track_and_title_from_filename() {
+        let parsed = parse_filename_metadata(Path::new(
+            "03_Crissy Criss - Dont be Scared E.P - 03 Pounds.flac",
+        ));
+
+        assert_eq!(
+            parsed,
+            ParsedFilenameMetadata {
+                title: Some("Pounds".into()),
+                artist: Some("Crissy Criss".into()),
+                album: Some("Dont be Scared E.P".into()),
+                track_number: Some(3),
+            }
+        );
+    }
+
+    #[test]
+    fn parses_common_track_number_separators() {
+        let dot = parse_filename_metadata(Path::new(
+            "04. Crissy Criss - Dont be Scared E.P - Fackin Ell.mp3",
+        ));
+        let dash = parse_filename_metadata(Path::new("05 - Chop Chop.wav"));
+        let underscore = parse_filename_metadata(Path::new("06_Gimmi Gimmi.flac"));
+
+        assert_eq!(dot.track_number, Some(4));
+        assert_eq!(dot.title.as_deref(), Some("Fackin Ell"));
+        assert_eq!(dash.track_number, Some(5));
+        assert_eq!(dash.title.as_deref(), Some("Chop Chop"));
+        assert_eq!(underscore.track_number, Some(6));
+        assert_eq!(underscore.title.as_deref(), Some("Gimmi Gimmi"));
+    }
+
+    #[test]
+    fn fallback_track_uses_filename_metadata_before_folder_defaults() {
+        let temp_dir = TestDir::new("fallback-parsing");
+        let track_path = temp_dir.path().join(
+            "Library Artist/Folder Album/03_Crissy Criss - Dont be Scared E.P - 03 Pounds.flac",
+        );
+        write_test_file(&track_path);
+
+        let track = fallback_track(&track_path, &mut AlbumArtCache::new())
+            .expect("fallback track should be created");
+
+        assert_eq!(track.artist, "Crissy Criss");
+        assert_eq!(track.album, "Dont be Scared E.P");
+        assert_eq!(track.title, "Pounds");
+        assert_eq!(track.track_number, Some(3));
+    }
+
+    #[test]
+    fn fallback_track_uses_folder_defaults_when_filename_is_partial() {
+        let temp_dir = TestDir::new("fallback-partial");
+        let track_path = temp_dir
+            .path()
+            .join("Crissy Criss/Dont be Scared E.P/07_Kebab Kurtens.flac");
+        write_test_file(&track_path);
+
+        let track = fallback_track(&track_path, &mut AlbumArtCache::new())
+            .expect("fallback track should be created");
+
+        assert_eq!(track.artist, "Crissy Criss");
+        assert_eq!(track.album, "Dont be Scared E.P");
+        assert_eq!(track.title, "Kebab Kurtens");
+        assert_eq!(track.track_number, Some(7));
+    }
+
+    #[test]
+    fn malformed_filenames_do_not_get_worse_than_basic_cleanup() {
+        let parsed = parse_filename_metadata(Path::new("Artist---Album__???.mp3"));
+
+        assert_eq!(parsed.artist, None);
+        assert_eq!(parsed.album, None);
+        assert_eq!(parsed.track_number, None);
+        assert_eq!(parsed.title.as_deref(), Some("Artist---Album ???"));
+    }
+
+    #[test]
+    fn embedded_tags_override_filename_fallback_values() {
+        let temp_dir = TestDir::new("embedded-tag-precedence");
+        let track_path = temp_dir.path().join(
+            "Folder Artist/Folder Album/03_Crissy Criss - Dont be Scared E.P - 03 Pounds.flac",
+        );
+        write_test_file(&track_path);
+
+        let mut track = fallback_track(&track_path, &mut AlbumArtCache::new())
+            .expect("fallback track should be created");
+        apply_embedded_tag(&mut track, StandardTagKey::TrackTitle, "Egg Yolk");
+        apply_embedded_tag(&mut track, StandardTagKey::Artist, "Chord Marauders");
+        apply_embedded_tag(&mut track, StandardTagKey::Album, "Dont Be Scared");
+        apply_embedded_tag(&mut track, StandardTagKey::TrackNumber, "9/12");
+
+        assert_eq!(track.title, "Egg Yolk");
+        assert_eq!(track.artist, "Chord Marauders");
+        assert_eq!(track.album, "Dont Be Scared");
+        assert_eq!(track.track_number, Some(9));
     }
 }

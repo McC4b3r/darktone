@@ -40,7 +40,7 @@ describe("library helpers", () => {
   it("normalizes missing metadata", () => {
     const normalized = normalizeLibrary(library);
     const missingMetadataTrack = normalized.tracks.find((track) => track.id === "1");
-    expect(missingMetadataTrack?.title).toBe("track-1.mp3");
+    expect(missingMetadataTrack?.title).toBe("track-1");
     expect(missingMetadataTrack?.artist).toBe(UNKNOWN_ARTIST);
     expect(missingMetadataTrack?.album).toBe(UNKNOWN_ALBUM);
   });
@@ -85,5 +85,34 @@ describe("library helpers", () => {
     };
     const normalized = normalizeLibrary(duplicated);
     expect(normalized.tracks).toHaveLength(2);
+  });
+
+  it("cleans whitespace-only display noise from scan results", () => {
+    const normalized = normalizeLibrary({
+      scannedAt: Date.now(),
+      tracks: [
+        {
+          id: "messy",
+          path: "/music/crissy/dont-be-scared/03.flac",
+          artPath: null,
+          filename: "03_Crissy Criss - Dont be Scared E.P - 03 Pounds.flac",
+          title: "   Pounds   ",
+          artist: "  Crissy   Criss  ",
+          album: " Dont   be Scared E.P ",
+          releaseYear: null,
+          trackNumber: 3,
+          durationMs: 1000,
+          format: "flac",
+          modifiedAt: 3,
+        },
+      ],
+    });
+
+    expect(normalized.tracks[0]).toMatchObject({
+      title: "Pounds",
+      artist: "Crissy Criss",
+      album: "Dont be Scared E.P",
+      trackNumber: 3,
+    });
   });
 });
